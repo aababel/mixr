@@ -60,6 +60,41 @@ export type MixResult = {
   manifest: MixManifest;
 };
 
+export type Vote = {
+  from_id: string;
+  to_id: string;
+  a_requested_seconds: number;
+  b_requested_seconds: number;
+  chosen: "A" | "B";
+};
+
+export type Preference = {
+  overlap_preference: number;
+  votes: Vote[];
+  completed: boolean;
+};
+
+export const NEUTRAL_PREFERENCE: Preference = {
+  overlap_preference: 0,
+  votes: [],
+  completed: false,
+};
+
+export type CalibrationTrial = {
+  trial_id: string;
+  from_id: string;
+  to_id: string;
+  a: { audio_url: string };
+  b: { audio_url: string };
+};
+
+export type VoteResult = {
+  preference: Preference;
+  chosen_overlap_seconds: number;
+  other_overlap_seconds: number;
+  chose_longer: boolean;
+};
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -111,11 +146,31 @@ export function orderTracks(trackIds: string[]) {
   });
 }
 
-export function createMix(orderedTrackIds: string[], overlapPreference = 0) {
+export function createMix(orderedTrackIds: string[], preference: Preference = NEUTRAL_PREFERENCE) {
   return postJson<MixResult>("/api/mix", {
     ordered_track_ids: orderedTrackIds,
-    overlap_preference: overlapPreference,
+    overlap_preference: preference.overlap_preference,
+    calibrated: preference.votes.length > 0,
   });
+}
+
+export function previewCalibration(orderedTrackIds: string[], trial: number) {
+  return postJson<CalibrationTrial>("/api/calibration/preview", {
+    ordered_track_ids: orderedTrackIds,
+    trial,
+  });
+}
+
+export function voteCalibration(trialId: string, chosen: "A" | "B", preference: Preference) {
+  return postJson<VoteResult>("/api/calibration/vote", {
+    trial_id: trialId,
+    chosen,
+    preference,
+  });
+}
+
+export function apiUrl(path: string) {
+  return `${API_URL}${path}`;
 }
 
 export function trackAudioUrl(trackId: string) {

@@ -4,14 +4,19 @@ import { useRef, useState } from "react";
 
 import {
   ApiError,
+  NEUTRAL_PREFERENCE,
   analyzeTracks,
   createMix,
   orderTracks,
+  previewCalibration,
   uploadTracks,
+  type CalibrationTrial,
   type MixResult as Mix,
+  type Preference,
   type Track,
 } from "@/lib/api";
 
+import Calibration from "./Calibration";
 import Dropzone from "./Dropzone";
 import MixResult from "./MixResult";
 import Stepper from "./Stepper";
@@ -24,27 +29,38 @@ const MAX_TRACKS = 5;
 const ALLOWED_EXTENSIONS = [".mp3", ".wav"];
 const MIN_LOADING_MS = 700;
 
-type Stage = "select" | "uploaded" | "analyzed" | "ordered" | "mixed";
-type Job = "upload" | "analyze" | "order" | "mix";
+type Stage = "select" | "uploaded" | "analyzed" | "ordered" | "tuning" | "mixed";
+type Job = "upload" | "analyze" | "order" | "preview" | "mix";
 
-const STAGES: Stage[] = ["select", "uploaded", "analyzed", "ordered", "mixed"];
-const STEP_LABELS = ["Upload", "Analyze", "Order", "Mix", "Listen"];
+const STEP_LABELS = ["Upload", "Analyze", "Order", "Tune", "Listen"];
+const STEP_OF: Record<Stage, number> = {
+  select: 0,
+  uploaded: 1,
+  analyzed: 2,
+  ordered: 3,
+  tuning: 3,
+  mixed: 4,
+};
 
 const LOADING: Record<Job, { title: string; detail: string }> = {
   upload: { title: "Uploading your tracks", detail: "Making sure every file is real audio" },
   analyze: { title: "Listening closely", detail: "Reading tempo, beats, key and energy" },
   order: { title: "Finding the best order", detail: "Scoring how each song flows into the next" },
-  mix: { title: "Mixing", detail: "Blending every transition" },
+  preview: { title: "Rendering two previews", detail: "Same transition, two overlap lengths" },
+  mix: { title: "Mixing", detail: "Beat-matching and blending every transition" },
 };
 
-const HEADINGS: Record<Exclude<Stage, "mixed">, { title: string; detail: string }> = {
+const HEADINGS: Record<Exclude<Stage, "tuning" | "mixed">, { title: string; detail: string }> = {
   select: {
     title: "Start a new mix",
     detail: `Pick ${MIN_TRACKS} to ${MAX_TRACKS} songs you want blended together.`,
   },
   uploaded: { title: "Your tracks", detail: "Next, Mixr analyzes each song." },
   analyzed: { title: "Analyzed", detail: "Next, Mixr finds the order that flows best." },
-  ordered: { title: "Your running order", detail: "Ready to mix." },
+  ordered: {
+    title: "Your running order",
+    detail: "Tune the transitions to your taste in a few quick comparisons, or mix right away.",
+  },
 };
 
 function validateFiles(files: File[]): string | null {
@@ -65,6 +81,8 @@ export default function Mixr() {
   const [files, setFiles] = useState<File[]>([]);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [mixResult, setMixResult] = useState<Mix | null>(null);
+  const [preference, setPreference] = useState<Preference>(NEUTRAL_PREFERENCE);
+  const [firstTrial, setFirstTrial] = useState<CalibrationTrial | null>(null);
   const [stage, setStage] = useState<Stage>("select");
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -115,9 +133,15 @@ export default function Mixr() {
       setStage("ordered");
     });
 
+  const tune = () =>
+    run("preview", async () => {
+      setFirstTrial(await previewCalibration(trackIds, 0));
+      setStage("tuning");
+    });
+
   const mix = () =>
     run("mix", async () => {
-      setMixResult(await createMix(trackIds));
+      setMixResult(await createMix(trackIds, preference));
       setStage("mixed");
     });
 
@@ -125,6 +149,8 @@ export default function Mixr() {
     setFiles([]);
     setTracks([]);
     setMixResult(null);
+    setPreference(NEUTRAL_PREFERENCE);
+    setFirstTrial(null);
     setStage("select");
     setError(null);
     setNotice(null);
@@ -134,14 +160,14 @@ export default function Mixr() {
   const nextAction = {
     uploaded: { label: "Analyze tracks", onClick: analyze },
     analyzed: { label: "Find the best order", onClick: order },
-    ordered: { label: "Mix it", onClick: mix },
+    ordered: { label: "Tune my transitions", onClick: tune },
   }[stage as "uploaded" | "analyzed" | "ordered"];
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-8 px-6 pt-4 pb-16">
-      <Stepper steps={STEP_LABELS} current={STAGES.indexOf(stage)} />
+      <Stepper steps={STEP_LABELS} current={STEP_OF[stage]} />
 
-      {stage !== "mixed" && !job && (
+      {stage !== "mixed" && stage !== "tuning" && !job && (
         <div className="animate-fade-up flex flex-col gap-1">
           <h1 className="font-display text-3xl font-semibold">{HEADINGS[stage].title}</h1>
           <p className="text-neutral-400">{HEADINGS[stage].detail}</p>
@@ -150,6 +176,15 @@ export default function Mixr() {
 
       {job ? (
         <LoadingPanel {...LOADING[job]} />
+      ) : stage === "tuning" && firstTrial ? (
+        <Calibration
+          orderedIds={trackIds}
+          tracks={tracks}
+          initialTrial={firstTrial}
+          preference={preference}
+          onPreference={setPreference}
+          onMix={mix}
+        />
       ) : stage === "select" ? (
         <section className="flex flex-col gap-4">
           <Dropzone ref={inputRef} min={MIN_TRACKS} max={MAX_TRACKS} onFiles={pickFiles} />
@@ -185,16 +220,15 @@ export default function Mixr() {
             </ul>
           )}
 
-          {stage === "analyzed" && tracks.every((t) => t.analysis_status === "pending") && (
-            <p className="text-sm text-neutral-500">
-              Audio analysis isn&apos;t connected yet, so BPM and key aren&apos;t shown.
-            </p>
-          )}
-
           <div className="flex flex-col gap-3 sm:flex-row">
             {nextAction && (
               <Button onClick={nextAction.onClick} className="flex-1">
                 {nextAction.label}
+              </Button>
+            )}
+            {stage === "ordered" && (
+              <Button variant="ghost" onClick={mix}>
+                Skip, mix now
               </Button>
             )}
             <Button variant="ghost" onClick={reset} className={nextAction ? "" : "flex-1"}>
