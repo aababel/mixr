@@ -1,9 +1,11 @@
 """HTTP routes (owner: Shaan).
 
 Upload is real. Analyze and order return placeholder data in the agreed
-schema until backend/audio and backend/logic land. Calibration and mix
-return 501 rather than fake audio.
+schema until backend/audio and backend/logic land. Mix calls
+backend.audio.mix.render_mix once it exists (see docs/integration.md) and
+returns 501 until then. Calibration returns 501.
 """
+import importlib
 import os
 import uuid
 from pathlib import Path
@@ -11,9 +13,9 @@ from pathlib import Path
 import soundfile as sf
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from backend.api.schemas import PairScore, Track
+from backend.api.schemas import MixManifest, PairScore, Track
 
 router = APIRouter()
 
@@ -22,9 +24,12 @@ MIN_TRACKS = 3
 MAX_TRACKS = 5
 MAX_FILE_BYTES = 50 * 1024 * 1024
 CHUNK_BYTES = 1024 * 1024
+DEFAULT_OVERLAP_SECONDS = 8.0
 
 _tracks: dict[str, Track] = {}
 _track_paths: dict[str, Path] = {}
+_mixes: dict[str, MixManifest] = {}
+_mix_paths: dict[str, Path] = {}
 
 
 def storage_dir() -> Path:
@@ -61,6 +66,17 @@ class AnalyzeResponse(BaseModel):
 class OrderResponse(BaseModel):
     ordered_track_ids: list[str]
     scores: list[PairScore]
+
+
+class MixRequest(BaseModel):
+    ordered_track_ids: list[str]
+    overlap_preference: float = Field(0.0, ge=-1.0, le=1.0)
+
+
+class MixResponse(BaseModel):
+    mix_id: str
+    audio_url: str
+    manifest: MixManifest
 
 
 async def _save_upload(upload: UploadFile, dest: Path) -> None:
@@ -155,11 +171,68 @@ def calibration_vote():
     raise HTTPException(501, "Calibration voting is not implemented yet (backend/logic)")
 
 
-@router.post("/mix")
-def mix():
-    raise HTTPException(501, "Mixing needs render_transition (backend/audio)")
+def _optional(module: str, name: str):
+    """Return module.name, or None if the module or function doesn't exist yet."""
+    try:
+        return getattr(importlib.import_module(module), name, None)
+    except ModuleNotFoundError as e:
+        if e.name != module:
+            raise
+        return None
 
 
-@router.get("/mixes/{mix_id}")
+@router.post("/mix", response_model=MixResponse)
+def mix(request: MixRequest):
+    tracks = [get_track(tid) for tid in request.ordered_track_ids]
+    if len(tracks) < 2:
+        raise HTTPException(400, "A mix needs at least two tracks")
+    if len(set(request.ordered_track_ids)) != len(tracks):
+        raise HTTPException(400, "Each track can appear in the mix only once")
+
+    render_mix = _optional("backend.audio.mix", "render_mix")
+    if render_mix is None:
+        raise HTTPException(501, "Mixing needs render_mix (backend/audio/mix.py)")
+    recommend = _optional("backend.logic.calibration", "recommended_overlap_seconds")
+    overlap = (
+        recommend(request.overlap_preference) if recommend else DEFAULT_OVERLAP_SECONDS
+    )
+
+    mix_id = uuid.uuid4().hex[:12]
+    mixes_dir = storage_dir() / "mixes"
+    mixes_dir.mkdir(exist_ok=True)
+    out_path = mixes_dir / f"{mix_id}.wav"
+    try:
+        manifest = render_mix(
+            mix_id=mix_id,
+            tracks=tracks,
+            paths=[get_track_path(t.id) for t in tracks],
+            overlap_seconds=[overlap] * (len(tracks) - 1),
+            out_path=out_path,
+        )
+    except Exception as e:
+        out_path.unlink(missing_ok=True)
+        raise HTTPException(500, f"Mix failed: {e}")
+    if not out_path.exists():
+        raise HTTPException(500, "Mix failed: renderer did not write an audio file")
+
+    _mixes[mix_id] = manifest
+    _mix_paths[mix_id] = out_path
+    return _mix_response(mix_id)
+
+
+def _mix_response(mix_id: str) -> MixResponse:
+    manifest = _mixes.get(mix_id)
+    if manifest is None:
+        raise HTTPException(404, f"Unknown mix id: {mix_id}")
+    return MixResponse(mix_id=mix_id, audio_url=f"/api/mixes/{mix_id}/audio", manifest=manifest)
+
+
+@router.get("/mixes/{mix_id}", response_model=MixResponse)
 def read_mix(mix_id: str):
-    raise HTTPException(404, f"Unknown mix id: {mix_id}")
+    return _mix_response(mix_id)
+
+
+@router.get("/mixes/{mix_id}/audio")
+def read_mix_audio(mix_id: str):
+    _mix_response(mix_id)
+    return FileResponse(_mix_paths[mix_id], media_type="audio/wav", filename=f"mixr-{mix_id}.wav")

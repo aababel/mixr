@@ -9,27 +9,26 @@ import {
   orderTracks,
   trackAudioUrl,
   uploadTracks,
+  type MixResult as Mix,
   type Track,
 } from "@/lib/api";
+import { formatSeconds } from "@/lib/format";
+
+import MixResult from "./MixResult";
 
 const MIN_TRACKS = 3;
 const MAX_TRACKS = 5;
 const ALLOWED_EXTENSIONS = [".mp3", ".wav"];
 
-type Stage = "select" | "uploaded" | "analyzed" | "ordered";
+type Stage = "select" | "uploaded" | "analyzed" | "ordered" | "mixed";
 
 const STEPS: { stage: Stage; label: string }[] = [
   { stage: "select", label: "Upload" },
   { stage: "uploaded", label: "Analyze" },
   { stage: "analyzed", label: "Order" },
   { stage: "ordered", label: "Mix" },
+  { stage: "mixed", label: "Listen" },
 ];
-
-function formatSeconds(seconds: number) {
-  const m = Math.floor(seconds / 60);
-  const s = Math.round(seconds % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
 
 function validateFiles(files: File[]): string | null {
   const bad = files.find(
@@ -46,6 +45,7 @@ export default function Mixr() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [tracks, setTracks] = useState<Track[]>([]);
+  const [mixResult, setMixResult] = useState<Mix | null>(null);
   const [stage, setStage] = useState<Stage>("select");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -99,12 +99,14 @@ export default function Mixr() {
 
   const mix = () =>
     run("Mixing", async () => {
-      await createMix(trackIds);
+      setMixResult(await createMix(trackIds));
+      setStage("mixed");
     });
 
   function reset() {
     setFiles([]);
     setTracks([]);
+    setMixResult(null);
     setStage("select");
     setError(null);
     setNotice(null);
@@ -156,7 +158,9 @@ export default function Mixr() {
                 : "border-neutral-700 hover:border-neutral-500"
             }`}
           >
-            <span className="text-lg font-medium">Drop {MIN_TRACKS}–{MAX_TRACKS} songs here</span>
+            <span className="text-lg font-medium">
+              Drop {MIN_TRACKS}–{MAX_TRACKS} songs here
+            </span>
             <span className="text-sm text-neutral-400">or click to choose MP3 or WAV files</span>
             <input
               ref={inputRef}
@@ -191,29 +195,33 @@ export default function Mixr() {
         </section>
       )}
 
+      {stage === "mixed" && mixResult && <MixResult mix={mixResult} tracks={tracks} />}
+
       {stage !== "select" && (
         <section className="flex flex-col gap-4">
-          <ul className="flex flex-col gap-3">
-            {tracks.map((track, i) => (
-              <li key={track.id} className="flex flex-col gap-3 rounded-2xl bg-neutral-900 p-4">
-                <div className="flex items-baseline justify-between gap-4">
-                  <span className="truncate font-medium">
-                    <span className="mr-2 text-neutral-500">{i + 1}.</span>
-                    {track.filename}
-                  </span>
-                  <span className="shrink-0 text-sm text-neutral-400">
-                    {formatSeconds(track.duration_seconds)}
-                    {track.bpm != null && ` · ${Math.round(track.bpm)} BPM`}
-                    {track.key_camelot && ` · ${track.key_camelot}`}
-                  </span>
-                </div>
-                {track.analysis_status === "error" && (
-                  <p className="text-sm text-red-400">{track.analysis_error}</p>
-                )}
-                <audio controls preload="none" src={trackAudioUrl(track.id)} className="w-full" />
-              </li>
-            ))}
-          </ul>
+          {stage !== "mixed" && (
+            <ul className="flex flex-col gap-3">
+              {tracks.map((track, i) => (
+                <li key={track.id} className="flex flex-col gap-3 rounded-2xl bg-neutral-900 p-4">
+                  <div className="flex items-baseline justify-between gap-4">
+                    <span className="truncate font-medium">
+                      <span className="mr-2 text-neutral-500">{i + 1}.</span>
+                      {track.filename}
+                    </span>
+                    <span className="shrink-0 text-sm text-neutral-400">
+                      {formatSeconds(track.duration_seconds)}
+                      {track.bpm != null && ` · ${Math.round(track.bpm)} BPM`}
+                      {track.key_camelot && ` · ${track.key_camelot}`}
+                    </span>
+                  </div>
+                  {track.analysis_status === "error" && (
+                    <p className="text-sm text-red-400">{track.analysis_error}</p>
+                  )}
+                  <audio controls preload="none" src={trackAudioUrl(track.id)} className="w-full" />
+                </li>
+              ))}
+            </ul>
+          )}
 
           {stage === "analyzed" && tracks.every((t) => t.analysis_status === "pending") && (
             <p className="text-sm text-neutral-500">
@@ -222,9 +230,7 @@ export default function Mixr() {
           )}
 
           <div className="flex gap-3">
-            {stage === "uploaded" && (
-              <ActionButton label="Analyze" busy={busy} onClick={analyze} />
-            )}
+            {stage === "uploaded" && <ActionButton label="Analyze" busy={busy} onClick={analyze} />}
             {stage === "analyzed" && <ActionButton label="Order" busy={busy} onClick={order} />}
             {stage === "ordered" && <ActionButton label="Mix" busy={busy} onClick={mix} />}
             <button

@@ -59,6 +59,10 @@ def render_mix(
     The manifest reports actual, not requested, values."""
 ```
 
+`outgoing_start_seconds` is measured from the start of the outgoing track,
+not from the start of the mix. The UI adds these up to show where each song
+starts in the mix.
+
 Used by `POST /api/mix`.
 
 ### Claude mood (optional)

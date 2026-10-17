@@ -25,6 +25,41 @@ export type PairScore = {
   mood: number | null;
 };
 
+export type AppliedTransition = {
+  from_id: string;
+  to_id: string;
+  mode: "preview" | "final";
+  fade_style: "equal_power" | "linear";
+  requested_overlap_seconds: number;
+  actual_overlap_seconds: number;
+  overlap_changed_for_safety: boolean;
+  outgoing_start_seconds: number;
+  incoming_start_seconds: number;
+  beat_alignment_adjustments_seconds: number;
+  applied_gain_db: Record<string, number>;
+  applied_eq: string | null;
+  tempo_change: number | null;
+  safety_adjustments: string[];
+  output_duration_seconds: number;
+};
+
+export type MixManifest = {
+  mix_id: string;
+  ordered_track_ids: string[];
+  transitions: AppliedTransition[];
+  source_durations_seconds: number[];
+  output_duration_seconds: number;
+  calibrated: boolean;
+  overlap_preference: number;
+  limitations: string[];
+};
+
+export type MixResult = {
+  mix_id: string;
+  audio_url: string;
+  manifest: MixManifest;
+};
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -76,10 +111,17 @@ export function orderTracks(trackIds: string[]) {
   });
 }
 
-export function createMix(orderedTrackIds: string[]) {
-  return postJson<{ mix_id: string }>("/api/mix", { ordered_track_ids: orderedTrackIds });
+export function createMix(orderedTrackIds: string[], overlapPreference = 0) {
+  return postJson<MixResult>("/api/mix", {
+    ordered_track_ids: orderedTrackIds,
+    overlap_preference: overlapPreference,
+  });
 }
 
 export function trackAudioUrl(trackId: string) {
   return `${API_URL}/api/tracks/${trackId}/audio`;
+}
+
+export function mixAudioUrl(mix: MixResult) {
+  return `${API_URL}${mix.audio_url}`;
 }

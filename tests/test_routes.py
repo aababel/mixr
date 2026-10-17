@@ -1,4 +1,5 @@
 import io
+import sys
 
 import numpy as np
 import pytest
@@ -6,6 +7,7 @@ import soundfile as sf
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from tests import fake_audio
 
 
 @pytest.fixture
@@ -88,6 +90,58 @@ def test_unknown_track_ids_404(client):
 
 
 def test_unimplemented_stages_are_honest(client):
-    assert client.post("/api/mix").status_code == 501
     assert client.post("/api/calibration/preview").status_code == 501
     assert client.post("/api/calibration/vote").status_code == 501
+
+
+@pytest.fixture
+def no_renderer(monkeypatch):
+    monkeypatch.setitem(sys.modules, "backend.audio.mix", None)
+
+
+@pytest.fixture
+def fake_renderer(monkeypatch):
+    monkeypatch.setitem(sys.modules, "backend.audio.mix", fake_audio.as_module())
+    monkeypatch.setitem(sys.modules, "backend.logic.calibration", None)
+
+
+def test_mix_without_renderer_is_501(client, no_renderer):
+    ids = upload(client)["track_ids"]
+    res = client.post("/api/mix", json={"ordered_track_ids": ids})
+    assert res.status_code == 501
+    assert "render_mix" in res.json()["detail"]
+
+
+def test_mix_validates_tracks(client, fake_renderer):
+    ids = upload(client)["track_ids"]
+    assert client.post("/api/mix", json={"ordered_track_ids": ids[:1]}).status_code == 400
+    assert client.post("/api/mix", json={"ordered_track_ids": [ids[0], ids[0]]}).status_code == 400
+    assert client.post("/api/mix", json={"ordered_track_ids": [ids[0], "nope"]}).status_code == 404
+    bad_pref = {"ordered_track_ids": ids, "overlap_preference": 2}
+    assert client.post("/api/mix", json=bad_pref).status_code == 422
+
+
+def test_mix_end_to_end(client, fake_renderer):
+    ids = upload(client)["track_ids"]
+    res = client.post("/api/mix", json={"ordered_track_ids": ids})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    manifest = body["manifest"]
+    assert manifest["ordered_track_ids"] == ids
+    assert len(manifest["transitions"]) == 2
+    assert manifest["transitions"][0]["requested_overlap_seconds"] == 8.0
+    assert manifest["transitions"][0]["overlap_changed_for_safety"] is True
+    seam = manifest["transitions"][1]
+    assert seam["outgoing_start_seconds"] == pytest.approx(1.0 - seam["actual_overlap_seconds"])
+
+    assert client.get(f"/api/mixes/{body['mix_id']}").json() == body
+    audio = client.get(body["audio_url"])
+    assert audio.status_code == 200
+    assert "attachment" in audio.headers["content-disposition"]
+    duration = sf.info(io.BytesIO(audio.content)).duration
+    assert duration == pytest.approx(manifest["output_duration_seconds"], abs=0.01)
+
+
+def test_unknown_mix_404(client):
+    assert client.get("/api/mixes/nope").status_code == 404
+    assert client.get("/api/mixes/nope/audio").status_code == 404
