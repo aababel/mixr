@@ -14,10 +14,10 @@ def client(tmp_path, monkeypatch):
     return TestClient(app)
 
 
-def wav_bytes(seconds=1.0, sr=22050):
+def wav_bytes(seconds=1.0, sr=22050, freq=440):
     t = np.linspace(0, seconds, int(sr * seconds), endpoint=False)
     buf = io.BytesIO()
-    sf.write(buf, 0.2 * np.sin(2 * np.pi * 440 * t), sr, format="WAV")
+    sf.write(buf, 0.2 * np.sin(2 * np.pi * freq * t), sr, format="WAV")
     return buf.getvalue()
 
 
@@ -74,12 +74,42 @@ def test_read_track_audio(client):
     assert client.get("/api/tracks/nope/audio").status_code == 404
 
 
-def test_analyze_and_order_stubs(client):
+def click_wav_bytes(bpm, seconds=12.0, sr=22050):
+    y = np.zeros(int(sr * seconds), dtype=np.float32)
+    t = np.arange(400) / sr
+    click = np.sin(2 * np.pi * 1000 * t) * np.exp(-t * 60) * 0.8
+    for beat in np.arange(0.3, seconds - 0.05, 60.0 / bpm):
+        i = int(beat * sr)
+        y[i : i + 400] += click[: len(y) - i]
+    buf = io.BytesIO()
+    sf.write(buf, y, sr, format="WAV")
+    return buf.getvalue()
+
+
+def song_files(seconds=40.0):
+    return [
+        ("files", (f"song{i}.wav", wav_bytes(seconds, freq=freq), "audio/wav"))
+        for i, freq in enumerate([330, 440, 550])
+    ]
+
+
+def test_analyze_fills_features_and_persists(client):
+    files = [("files", (f"click{b}.wav", click_wav_bytes(b), "audio/wav")) for b in (120, 124, 128)]
+    ids = client.post("/api/tracks", files=files).json()["track_ids"]
+    tracks = client.post("/api/analyze", json={"track_ids": ids}).json()["tracks"]
+    assert [t["id"] for t in tracks] == ids
+    assert all(t["analysis_status"] == "ok" for t in tracks)
+    assert tracks[0]["bpm"] == pytest.approx(120, rel=0.02)
+    assert tracks[0]["beats_seconds"]
+    assert client.get(f"/api/tracks/{ids[0]}").json()["bpm"] == tracks[0]["bpm"]
+
+
+def test_order_returns_every_track_once_with_scores(client):
     ids = upload(client)["track_ids"]
-    analyzed = client.post("/api/analyze", json={"track_ids": ids}).json()
-    assert [t["id"] for t in analyzed["tracks"]] == ids
-    ordered = client.post("/api/order", json={"track_ids": ids}).json()
-    assert ordered == {"ordered_track_ids": ids, "scores": []}
+    client.post("/api/analyze", json={"track_ids": ids})
+    body = client.post("/api/order", json={"track_ids": ids}).json()
+    assert sorted(body["ordered_track_ids"]) == sorted(ids)
+    assert len(body["scores"]) == len(ids) * (len(ids) - 1)
 
 
 def test_unknown_track_ids_404(client):
@@ -87,7 +117,84 @@ def test_unknown_track_ids_404(client):
     assert client.post("/api/order", json={"track_ids": ["nope"]}).status_code == 404
 
 
-def test_unimplemented_stages_are_honest(client):
-    assert client.post("/api/mix").status_code == 501
-    assert client.post("/api/calibration/preview").status_code == 501
-    assert client.post("/api/calibration/vote").status_code == 501
+def test_calibration_preview_and_vote(client):
+    ids = client.post("/api/tracks", files=song_files()).json()["track_ids"]
+    res = client.post("/api/calibration/preview", json={"ordered_track_ids": ids})
+    assert res.status_code == 200, res.text
+    trial = res.json()
+    assert (trial["from_id"], trial["to_id"]) == (ids[0], ids[1])
+    for variant in ("a", "b"):
+        audio = client.get(trial[variant]["audio_url"])
+        assert audio.status_code == 200
+        assert sf.info(io.BytesIO(audio.content)).duration > 0
+
+    vote = client.post(
+        "/api/calibration/vote", json={"trial_id": trial["trial_id"], "chosen": "A"}
+    ).json()
+    p = vote["preference"]["overlap_preference"]
+    assert p == (0.5 if vote["chose_longer"] else -0.5)
+    assert len(vote["preference"]["votes"]) == 1
+    assert abs(vote["chosen_overlap_seconds"] - vote["other_overlap_seconds"]) >= 2.0
+
+
+def test_calibration_next_trial_uses_next_seam(client):
+    ids = client.post("/api/tracks", files=song_files()).json()["track_ids"]
+    trial = client.post(
+        "/api/calibration/preview", json={"ordered_track_ids": ids, "trial": 1}
+    ).json()
+    assert (trial["from_id"], trial["to_id"]) == (ids[1], ids[2])
+
+
+def test_calibration_rejects_songs_too_short_to_compare(client):
+    ids = upload(client)["track_ids"]
+    res = client.post("/api/calibration/preview", json={"ordered_track_ids": ids})
+    assert res.status_code == 422
+    assert "too short" in res.json()["detail"]
+
+
+def test_calibration_unknown_trial_404(client):
+    assert client.post(
+        "/api/calibration/vote", json={"trial_id": "nope", "chosen": "A"}
+    ).status_code == 404
+    assert client.get("/api/calibration/previews/nope/a").status_code == 404
+
+
+def test_mix_validates_tracks(client):
+    ids = upload(client)["track_ids"]
+    assert client.post("/api/mix", json={"ordered_track_ids": ids[:1]}).status_code == 400
+    assert client.post("/api/mix", json={"ordered_track_ids": [ids[0], ids[0]]}).status_code == 400
+    assert client.post("/api/mix", json={"ordered_track_ids": [ids[0], "nope"]}).status_code == 404
+    bad_pref = {"ordered_track_ids": ids, "overlap_preference": 2}
+    assert client.post("/api/mix", json=bad_pref).status_code == 422
+
+
+def test_full_pipeline(client):
+    ids = client.post("/api/tracks", files=song_files()).json()["track_ids"]
+    client.post("/api/analyze", json={"track_ids": ids})
+    ordered = client.post("/api/order", json={"track_ids": ids}).json()["ordered_track_ids"]
+
+    res = client.post(
+        "/api/mix",
+        json={"ordered_track_ids": ordered, "overlap_preference": 0.5, "calibrated": True},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    manifest = body["manifest"]
+    assert manifest["ordered_track_ids"] == ordered
+    assert manifest["calibrated"] is True
+    assert manifest["overlap_preference"] == 0.5
+    assert len(manifest["transitions"]) == 2
+
+    assert client.get(f"/api/mixes/{body['mix_id']}").json() == body
+    audio = client.get(body["audio_url"])
+    assert audio.status_code == 200
+    assert "attachment" in audio.headers["content-disposition"]
+    duration = sf.info(io.BytesIO(audio.content)).duration
+    assert duration == pytest.approx(manifest["output_duration_seconds"], abs=0.05)
+    overlaps = sum(t["actual_overlap_seconds"] for t in manifest["transitions"])
+    assert duration == pytest.approx(3 * 40.0 - overlaps, abs=0.1)
+
+
+def test_unknown_mix_404(client):
+    assert client.get("/api/mixes/nope").status_code == 404
+    assert client.get("/api/mixes/nope/audio").status_code == 404
