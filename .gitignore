@@ -1,0 +1,31 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Secrets
+.env
+.env.local
+
+# Temp uploads and renders
+backend/storage/*
+!backend/storage/.gitkeep
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Audio: block everything except small royalty-free test fixtures
+*.mp3
+*.wav
+!tests/fixtures/*.mp3
+!tests/fixtures/*.wav
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

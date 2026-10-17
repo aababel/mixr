@@ -1,0 +1,7 @@
+# Replace SHAAN_HANDLE and SAHIL_HANDLE with real GitHub usernames.
+/backend/audio/          @aababel
+/backend/logic/          @SAHIL_HANDLE
+/backend/api/routes.py   @SHAAN_HANDLE
+/backend/main.py         @SHAAN_HANDLE
+/frontend/               @SHAAN_HANDLE
+/backend/api/schemas.py  @aababel @SAHIL_HANDLE @SHAAN_HANDLE
