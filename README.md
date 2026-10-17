@@ -42,6 +42,8 @@ Tests: `pytest`
 
 `backend/api/schemas.py` is shared: changes need all three to approve.
 
+`docs/integration.md` defines the functions the API calls in `backend/audio` and `backend/logic`.
+
 ## Rules
 
 - All audio time values are in seconds.
