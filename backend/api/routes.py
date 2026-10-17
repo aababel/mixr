@@ -10,6 +10,7 @@ from pathlib import Path
 
 import soundfile as sf
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from backend.api.schemas import PairScore, Track
@@ -123,6 +124,13 @@ async def upload_tracks(files: list[UploadFile] = File(...)):
 @router.get("/tracks/{track_id}", response_model=Track)
 def read_track(track_id: str):
     return get_track(track_id)
+
+
+@router.get("/tracks/{track_id}/audio")
+def read_track_audio(track_id: str):
+    path = get_track_path(track_id)
+    media_type = "audio/mpeg" if path.suffix == ".mp3" else "audio/wav"
+    return FileResponse(path, media_type=media_type, filename=get_track(track_id).filename)
 
 
 @router.post("/analyze", response_model=AnalyzeResponse)

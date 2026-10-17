@@ -4,7 +4,7 @@ Your playlist. DJ'd by AI. Built at DubHacks 2026 by Shaan, Aarav, and Sahil.
 
 Pipeline: Upload (3–5 MP3/WAV) → Analyze → Score → Order → optional A/B calibration → Mix → Play/Download.
 
-> Status: initial skeleton. Only the health route and shared schemas exist so far.
+> Status: upload works end to end. Analyze and order return placeholder data; calibration and mix return 501 until the renderer lands.
 
 ## Setup
 
@@ -18,7 +18,17 @@ cp .env.example .env             # optional: add ANTHROPIC_API_KEY
 uvicorn backend.main:app --reload --port 8000
 ```
 
-Check: http://localhost:8000/api/health returns `{"ok": true}`.
+Check: http://localhost:8000/api/health returns `{"ok": true}`. Interactive API docs: http://localhost:8000/docs
+
+Frontend (in a second terminal, with the backend running):
+
+```bash
+cd frontend
+npm install
+npm run dev                      # http://localhost:3000
+```
+
+Set `NEXT_PUBLIC_API_URL` in `frontend/.env.local` if the backend isn't on `http://localhost:8000`.
 
 Tests: `pytest`
 

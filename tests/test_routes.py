@@ -65,6 +65,15 @@ def test_read_track(client):
     assert client.get("/api/tracks/nope").status_code == 404
 
 
+def test_read_track_audio(client):
+    track_id = upload(client)["track_ids"][0]
+    res = client.get(f"/api/tracks/{track_id}/audio")
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "audio/wav"
+    assert sf.info(io.BytesIO(res.content)).duration == pytest.approx(1.0)
+    assert client.get("/api/tracks/nope/audio").status_code == 404
+
+
 def test_analyze_and_order_stubs(client):
     ids = upload(client)["track_ids"]
     analyzed = client.post("/api/analyze", json={"track_ids": ids}).json()
