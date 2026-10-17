@@ -2,6 +2,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.api.routes import router
+
 load_dotenv()
 
 app = FastAPI(title="Mixr")
@@ -19,6 +21,4 @@ def health():
     return {"ok": True}
 
 
-# Shaan: mount routes once they exist.
-# from backend.api.routes import router
-# app.include_router(router, prefix="/api")
+app.include_router(router, prefix="/api")
