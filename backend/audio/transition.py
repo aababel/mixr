@@ -14,8 +14,12 @@ Processing actually performed (and recorded in AppliedTransition):
   1. Clamp the requested overlap to a safe range (SafetyLimits).
   2. Optionally beat-snap: shift the overlap so the incoming track's first
      beat lands on an outgoing beat, staying inside the safe range.
-  3. Fade out / fade in (equal-power or linear). Track gain is 0 dB.
-  4. Soft limiter on the seam only if its peak exceeds the threshold.
+  3. Per-track gain (outgoing_gain_db / incoming_gain_db, default 0 dB),
+     applied to the seam and to preview context. The caller supplies one
+     gain per TRACK (see loudness.py), and mix.py applies the same gain to
+     the rest of that track, so level never jumps at a seam boundary.
+  4. Fade out / fade in (equal-power or linear).
+  5. Soft limiter on the seam only if its peak exceeds the threshold.
 No EQ and no tempo change are applied.
 """
 from dataclasses import dataclass
@@ -130,6 +134,12 @@ def _soft_limit(x: np.ndarray, threshold: float) -> np.ndarray:
 # ---------------------------------------------------------------- public API
 
 
+def gain_factor(gain_db: float) -> np.float32:
+    """Linear float32 factor for a dB gain. mix.py uses this too, so the
+    track body and its seams are scaled by the bit-identical factor."""
+    return np.float32(10.0 ** (float(gain_db) / 20.0))
+
+
 def render_transition(
     outgoing: np.ndarray,
     incoming: np.ndarray,
@@ -141,6 +151,8 @@ def render_transition(
     preview_context_seconds: float = 6.0,
     *,
     safety: SafetyLimits = DEFAULT_SAFETY,
+    outgoing_gain_db: float = 0.0,
+    incoming_gain_db: float = 0.0,
 ) -> tuple[np.ndarray, AppliedTransition]:
     """Render the seam between two tracks.
 
@@ -151,6 +163,10 @@ def render_transition(
 
     Audio may be (samples,), (samples, ch) or channels-first (ch, samples).
     Output is float32 shaped (samples, ch).
+
+    outgoing_gain_db / incoming_gain_db: whole-track gain for each side,
+    recorded as applied_gain_db. Pass the same value for a track at both of
+    its seams and in its preview.
     """
     if sr <= 0:
         raise ValueError("sr must be positive")
@@ -194,11 +210,12 @@ def render_transition(
     actual = ov / sr
     beat_adjust = actual - clamped if request.beat_align else 0.0
 
-    # 3. fades (0 dB track gain)
+    # 3. per-track gain, 4. fades
+    g_out, g_in = gain_factor(outgoing_gain_db), gain_factor(incoming_gain_db)
     fade_out, fade_in = _fades(ov, request.fade_style)
-    seam = out[o_start:] * fade_out + inc[:ov] * fade_in
+    seam = out[o_start:] * (fade_out * g_out) + inc[:ov] * (fade_in * g_in)
 
-    # 4. soft limiter, only when needed
+    # 5. soft limiter, only when needed
     peak = float(np.max(np.abs(seam)))
     if peak > safety.limiter_threshold:
         seam = _soft_limit(seam, safety.limiter_threshold)
@@ -213,8 +230,8 @@ def render_transition(
         audio = seam
     else:
         ctx = int(round(max(0.0, preview_context_seconds) * sr))
-        pre = out[max(0, o_start - ctx):o_start]
-        post = inc[ov:ov + ctx]
+        pre = out[max(0, o_start - ctx):o_start] * g_out
+        post = inc[ov:ov + ctx] * g_in
         audio = np.concatenate([pre, seam, post], axis=0).astype(np.float32)
 
     applied = AppliedTransition(
@@ -228,7 +245,7 @@ def render_transition(
         outgoing_start_seconds=o_start / sr,
         incoming_start_seconds=0.0,
         beat_alignment_adjustments_seconds=beat_adjust,
-        applied_gain_db={"outgoing": 0.0, "incoming": 0.0},
+        applied_gain_db={"outgoing": float(outgoing_gain_db), "incoming": float(incoming_gain_db)},
         applied_eq=None,
         tempo_change=None,
         safety_adjustments=notes,

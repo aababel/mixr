@@ -32,7 +32,7 @@ def three(tmp_path):
 def test_mix_keeps_every_track_complete(tmp_path, three):
     paths, tracks = [p for p, _ in three], [t for _, t in three]
     out = tmp_path / "mix.wav"
-    m = render_mix("m1", tracks, paths, [4.0, 6.0], out)
+    m = render_mix("m1", tracks, paths, [4.0, 6.0], out, loudness_match=False)
 
     mix, sr = sf.read(out, dtype="float32")
     src = [load_render_audio(p) for p in paths]
@@ -55,7 +55,7 @@ def test_mix_keeps_every_track_complete(tmp_path, three):
 def test_mix_seams_match_shared_renderer(tmp_path, three):
     paths, tracks = [p for p, _ in three], [t for _, t in three]
     out = tmp_path / "mix.wav"
-    m = render_mix("m1", tracks, paths, [4.0, 6.0], out)
+    m = render_mix("m1", tracks, paths, [4.0, 6.0], out, loudness_match=False)
     mix, _ = sf.read(out, dtype="float32")
     a, b = load_render_audio(paths[0]), load_render_audio(paths[1])
     req = TransitionRequest(from_id="a", to_id="b", requested_overlap_seconds=4.0)

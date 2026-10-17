@@ -8,6 +8,11 @@ A/B previews use. Every track is written in full; only the seams overlap:
 where end_i = len(t_i) - ov_i. The renderer caps each overlap at 50% of
 either track, so the head and tail seams of a middle track never collide.
 The mix is streamed to disk, holding at most two decoded tracks at once.
+
+Loudness matching: each track gets one gain (loudness.py) applied to its
+whole body AND passed to render_transition for both of its seams, using the
+same float32 factor, so level is continuous across seam boundaries and the
+seams match render_preview exactly.
 """
 from pathlib import Path
 
@@ -16,16 +21,24 @@ import soundfile as sf
 
 from backend.api.schemas import AppliedTransition, MixManifest, Track, TransitionRequest
 from backend.audio.loading import RENDER_SR, load_render_audio
-from backend.audio.transition import render_transition, seam_sample_bounds
+from backend.audio.loudness import DEFAULT_LOUDNESS, TrackGain, gain_notes, track_gain_for_path
+from backend.audio.transition import gain_factor, render_transition, seam_sample_bounds
+
+_CHUNK = RENDER_SR * 10  # scale and write long track bodies 10 s at a time
 
 
-def _write(f: sf.SoundFile, block: np.ndarray, stats: dict) -> None:
-    clipped = int(np.count_nonzero(np.abs(block) > 1.0))
-    if clipped:
-        stats["clipped"] += clipped
-        block = np.clip(block, -1.0, 1.0)
-    f.write(block)
-    stats["frames"] += block.shape[0]
+def _write(f: sf.SoundFile, block: np.ndarray, stats: dict, gain_db: float = 0.0) -> None:
+    g = gain_factor(gain_db)
+    for i in range(0, block.shape[0], _CHUNK):
+        part = block[i:i + _CHUNK]
+        if gain_db != 0.0:
+            part = part * g
+        clipped = int(np.count_nonzero(np.abs(part) > 1.0))
+        if clipped:
+            stats["clipped"] += clipped
+            part = np.clip(part, -1.0, 1.0)
+        f.write(part)
+        stats["frames"] += part.shape[0]
 
 
 def render_mix(
@@ -37,8 +50,13 @@ def render_mix(
     *,
     calibrated: bool = False,
     overlap_preference: float = 0.0,
+    loudness_match: bool = True,
 ) -> MixManifest:
-    """Write the full mix to out_path (WAV). The manifest reports actual values."""
+    """Write the full mix to out_path (WAV). The manifest reports actual values.
+
+    loudness_match: apply each track's loudness gain (same as render_preview).
+    Each transition's applied_gain_db records the gains actually used.
+    """
     if len(tracks) < 1 or len(tracks) != len(paths):
         raise ValueError("tracks and paths must be non-empty and the same length")
     if len(overlap_seconds) != len(tracks) - 1:
@@ -54,6 +72,16 @@ def render_mix(
     transitions: list[AppliedTransition] = []
     durations: list[float] = []
     stats = {"frames": 0, "clipped": 0}
+    gains: list[TrackGain | None] = []
+
+    def gain_for(i: int) -> TrackGain | None:
+        while len(gains) <= i:
+            gains.append(track_gain_for_path(paths[len(gains)]) if loudness_match else None)
+        return gains[i]
+
+    def db(i: int) -> float:
+        g = gain_for(i)
+        return g.gain_db if g else 0.0
 
     with sf.SoundFile(str(out_path), "w", RENDER_SR, 2, subtype="PCM_16") as f:
         current = load_render_audio(paths[0])
@@ -61,7 +89,7 @@ def render_mix(
         for i, track in enumerate(tracks):
             durations.append(current.shape[0] / RENDER_SR)
             if i == len(tracks) - 1:
-                _write(f, current[head:], stats)
+                _write(f, current[head:], stats, db(i))
                 break
 
             nxt_track = tracks[i + 1]
@@ -75,20 +103,38 @@ def render_mix(
                 current, nxt, RENDER_SR,
                 track.beats_seconds, nxt_track.beats_seconds,
                 request, "final",
+                outgoing_gain_db=db(i), incoming_gain_db=db(i + 1),
             )
+            if loudness_match:
+                notes = (gain_notes("outgoing", track.id, gain_for(i))
+                         + gain_notes("incoming", nxt_track.id, gain_for(i + 1)))
+                if notes:
+                    applied = applied.model_copy(
+                        update={"safety_adjustments": applied.safety_adjustments + notes}
+                    )
             o_start, ov = seam_sample_bounds(applied, RENDER_SR)
             if o_start < head:  # cannot happen with the 50% cap; guard anyway
                 raise RuntimeError(f"seam {i} overlaps the previous seam in track {track.id}")
 
-            _write(f, current[head:o_start], stats)
-            _write(f, seam, stats)
+            _write(f, current[head:o_start], stats, db(i))
+            _write(f, seam, stats)  # gain already applied inside the seam
             transitions.append(applied)
             current, head = nxt, ov
 
-    limitations = [
-        "no loudness normalization between tracks (0 dB gain)",
-        "no EQ or tempo change applied",
-    ]
+    if loudness_match:
+        limitations = [
+            f"loudness matched per track toward {DEFAULT_LOUDNESS.target_lufs:.1f} LUFS "
+            "(BS.1770 integrated, whole track); no limiter on track bodies, "
+            "so a boost stops at the track's peak headroom",
+        ]
+        short = [t.id for t, g in zip(tracks, gains) if g and g.note]
+        if short:
+            limitations.append(f"loudness target not reached for {', '.join(short)}")
+        if len(tracks) == 1 and gains[0] and gains[0].note:
+            limitations.append(f"{tracks[0].id}: {gains[0].note}")
+    else:
+        limitations = ["no loudness normalization between tracks (0 dB gain)"]
+    limitations.append("no EQ or tempo change applied")
     if stats["clipped"]:
         limitations.append(f"{stats['clipped']} samples clipped to [-1, 1] when writing 16-bit WAV")
     missing_beats = [t.id for t in tracks if not t.beats_seconds]
