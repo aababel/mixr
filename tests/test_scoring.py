@@ -6,6 +6,8 @@ from backend.api.schemas import Track
 from backend.audio.analysis import analyze_track
 from backend.logic.scoring import (
     NEUTRAL,
+    WEIGHTS,
+    camelot_steps,
     combine,
     energy_score,
     harmonic_score,
@@ -13,6 +15,7 @@ from backend.logic.scoring import (
     score_matrix,
     score_pair,
     score_pairs,
+    tempo_gap,
     tempo_score,
 )
 
@@ -166,3 +169,25 @@ def test_scores_real_analyze_track_output(tmp_path):
     for s in score_pairs(analyzed):
         assert s.tempo is not None and s.energy is not None
         assert 0.0 <= s.total <= 1.0
+
+
+def test_camelot_steps_shared_helper():
+    assert camelot_steps("8A", "9A") == (1, True)
+    assert camelot_steps("12A", "1B") == (1, False)
+    assert camelot_steps("8A", None) is None
+    assert camelot_steps("8A", "bogus") is None
+
+
+def test_tempo_gap_shared_helper():
+    assert tempo_gap(128, 128) == (0.0, False)
+    assert tempo_gap(64, 128) == (0.0, True)
+    assert tempo_gap(float("nan"), 128) is None
+    assert tempo_score(float("nan"), 128) is None
+    assert tempo_score(128, float("inf")) is None
+
+
+def test_weights_sum_to_one_so_neutral_stays_neutral():
+    # Regression guard: retuning the weights must keep an all-missing pair at
+    # exactly NEUTRAL, or unscored pairs would tilt the ordering.
+    assert sum(WEIGHTS.values()) == pytest.approx(1.0)
+    assert combine({}) == pytest.approx(NEUTRAL)

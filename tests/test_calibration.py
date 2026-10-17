@@ -67,3 +67,11 @@ def test_recommended_overlap_maps_preference_to_seconds():
 def test_recommended_overlap_stays_safe(p):
     seconds = recommended_overlap_seconds(p)
     assert DEFAULT_SAFETY.min_overlap_seconds <= seconds <= DEFAULT_SAFETY.max_overlap_seconds
+
+
+def test_calibration_range_fits_inside_renderer_safety_limits():
+    # If Aarav's SafetyLimits ever tighten past 4-12 s, every preference would
+    # clamp to the same overlap and calibration would silently do nothing.
+    short, long = calibration_overlaps()
+    assert DEFAULT_SAFETY.min_overlap_seconds <= short < long <= DEFAULT_SAFETY.max_overlap_seconds
+    assert recommended_overlap_seconds(-1.0) < recommended_overlap_seconds(0.0) < recommended_overlap_seconds(1.0)

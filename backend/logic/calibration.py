@@ -10,6 +10,8 @@ import math
 from backend.api.schemas import Preference, Vote
 from backend.audio.transition import DEFAULT_SAFETY
 
+# Must sit inside the renderer's SafetyLimits (1-16 s), or the clamp in
+# recommended_overlap_seconds would flatten every preference to one value.
 SHORT_OVERLAP_SECONDS = 4.0
 LONG_OVERLAP_SECONDS = 12.0
 VOTE_STEP = 0.5

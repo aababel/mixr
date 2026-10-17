@@ -11,6 +11,8 @@ from typing import Optional
 from backend.api.schemas import PairScore, Track
 
 # Starting weights from the project brief. Tune by ear, not by spreadsheet.
+# Keep them summing to 1.0: a pair with every sub-score missing must total
+# exactly NEUTRAL, which order_tracks also uses for unscored pairs.
 WEIGHTS = {"harmonic": 0.40, "tempo": 0.35, "energy": 0.15, "mood": 0.10}
 
 # Above this BPM gap (as a fraction) the tempo score bottoms out at 0.
@@ -41,18 +43,28 @@ def parse_camelot(key: str) -> Optional[tuple[int, str]]:
     return number, key[-1]
 
 
-def harmonic_score(from_key: Optional[str], to_key: Optional[str]) -> Optional[float]:
-    """Camelot wheel compatibility."""
+def camelot_steps(from_key: Optional[str], to_key: Optional[str]) -> Optional[tuple[int, bool]]:
+    """(steps around the wheel, same letter?), or None if either key is unknown.
+
+    Shared by harmonic_score and explain.py so the score and its explanation
+    always describe the same relationship.
+    """
     if from_key is None or to_key is None:
         return None
     a, b = parse_camelot(from_key), parse_camelot(to_key)
     if a is None or b is None:
         return None
-
     # Steps around the 12-position wheel, wrapping (12 -> 1 is one step).
     diff = abs(a[0] - b[0])
-    steps = min(diff, 12 - diff)
-    same_letter = a[1] == b[1]
+    return min(diff, 12 - diff), a[1] == b[1]
+
+
+def harmonic_score(from_key: Optional[str], to_key: Optional[str]) -> Optional[float]:
+    """Camelot wheel compatibility."""
+    relation = camelot_steps(from_key, to_key)
+    if relation is None:
+        return None
+    steps, same_letter = relation
 
     if steps == 0:
         return 1.0 if same_letter else 0.9  # same key / relative major-minor
@@ -63,16 +75,31 @@ def harmonic_score(from_key: Optional[str], to_key: Optional[str]) -> Optional[f
     return max(0.0, 0.4 - 0.05 * steps)
 
 
+def _valid_bpm(bpm: Optional[float]) -> bool:
+    return bpm is not None and math.isfinite(bpm) and bpm > 0  # librosa reports 0 for no beat
+
+
+def tempo_gap(from_bpm: Optional[float], to_bpm: Optional[float]) -> Optional[tuple[float, bool]]:
+    """(fractional BPM gap, matched via half/double time?), or None if unknown. Symmetric.
+
+    A 64 BPM and a 128 BPM track mix fine, so compare against whichever of
+    to_bpm, 2x, or 0.5x is closest. analyze_track already folds tempos into
+    90-180 BPM; this is the backstop for values that weren't folded.
+    Shared by tempo_score and explain.py.
+    """
+    if not _valid_bpm(from_bpm) or not _valid_bpm(to_bpm):
+        return None
+    direct = abs(from_bpm - to_bpm) / max(from_bpm, to_bpm)
+    half_double = min(abs(from_bpm - c) / max(from_bpm, c) for c in (to_bpm * 2, to_bpm / 2))
+    return (half_double, True) if half_double < direct else (direct, False)
+
+
 def tempo_score(from_bpm: Optional[float], to_bpm: Optional[float]) -> Optional[float]:
     """Closeness of BPM, treating half/double time as compatible. Symmetric."""
-    if from_bpm is None or to_bpm is None or from_bpm <= 0 or to_bpm <= 0:
-        return None  # librosa reports 0 when it finds no beat
-    # A 64 BPM and a 128 BPM track mix fine, so compare against whichever of
-    # to_bpm, 2x, or 0.5x is closest. analyze_track already folds tempos into
-    # 90-180 BPM; this is the backstop for values that weren't folded.
-    candidates = (to_bpm, to_bpm * 2, to_bpm / 2)
-    gap = min(abs(from_bpm - c) / max(from_bpm, c) for c in candidates)
-    return _clean(1.0 - gap / MAX_TEMPO_GAP)
+    gap = tempo_gap(from_bpm, to_bpm)
+    if gap is None:
+        return None
+    return _clean(1.0 - gap[0] / MAX_TEMPO_GAP)
 
 
 def _mean(values: list[float]) -> float:
