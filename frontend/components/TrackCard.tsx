@@ -13,7 +13,7 @@ export default function TrackCard({ track, position }: { track: Track; position:
   return (
     <li className="glass animate-fade-up flex flex-col gap-3 rounded-2xl p-4">
       <div className="flex items-center gap-4">
-        <span className="font-display text-neon w-8 shrink-0 text-2xl font-bold">
+        <span className="font-display text-neon w-12 shrink-0 text-2xl font-bold">
           {position.toString().padStart(2, "0")}
         </span>
         <div className="flex min-w-0 flex-1 flex-col gap-1.5">

@@ -140,10 +140,15 @@ export function analyzeTracks(trackIds: string[]) {
   return postJson<{ tracks: Track[] }>("/api/analyze", { track_ids: trackIds });
 }
 
+export type OrderResult = {
+  ordered_track_ids: string[];
+  scores: PairScore[];
+  /** Summary line first, then one line per transition. */
+  explanations: string[];
+};
+
 export function orderTracks(trackIds: string[]) {
-  return postJson<{ ordered_track_ids: string[]; scores: PairScore[] }>("/api/order", {
-    track_ids: trackIds,
-  });
+  return postJson<OrderResult>("/api/order", { track_ids: trackIds });
 }
 
 export function createMix(orderedTrackIds: string[], preference: Preference = NEUTRAL_PREFERENCE) {
