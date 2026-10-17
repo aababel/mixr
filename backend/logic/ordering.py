@@ -1,7 +1,8 @@
 """Track ordering (owner: Sahil).
 
-The demo uses 3-5 tracks, so we try every order (at most 120) and keep the
-best. Above BRUTE_FORCE_LIMIT we fall back to a greedy nearest-neighbor pass.
+Up to BRUTE_FORCE_LIMIT tracks we try every order and keep the best; above
+that we fall back to a greedy nearest-neighbor pass. Uploads are capped at
+5 tracks (120 orders), so the demo always takes the exhaustive path.
 """
 from itertools import permutations
 from typing import Sequence
