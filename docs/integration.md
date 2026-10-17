@@ -36,6 +36,7 @@ def render_preview(
     outgoing_path: Path, incoming_path: Path,
     outgoing: Track, incoming: Track,
     request: TransitionRequest, out_path: Path,
+    *, loudness_match: bool = True,
 ) -> AppliedTransition:
     """Write a short preview excerpt around the seam to out_path (WAV)
     using render_transition(mode="preview")."""
@@ -53,6 +54,8 @@ def render_mix(
     paths: list[Path],            # same order as tracks
     overlap_seconds: list[float], # requested overlap per seam, len(tracks) - 1
     out_path: Path,
+    *, calibrated: bool = False, overlap_preference: float = 0.0,
+    loudness_match: bool = True,
 ) -> MixManifest:
     """Write the full mix to out_path (WAV) using render_transition(mode="final")
     for every seam. Every track stays complete; only seams overlap.
@@ -60,6 +63,20 @@ def render_mix(
 ```
 
 Used by `POST /api/mix`.
+
+### Loudness matching (`loudness.py`)
+
+On by default in both `render_preview` and `render_mix`; routes need no
+change. Each track gets one gain toward -14 LUFS (BS.1770 integrated
+loudness), computed from that track alone, so a track's gain is identical in
+its A/B previews and in the final mix. A boost never pushes a sample past
+0.98 (no limiter on whole tracks), so a quiet track with loud peaks may stay
+below target; that is noted in `safety_adjustments` and `limitations`.
+
+`AppliedTransition.applied_gain_db` is `{"outgoing": dB, "incoming": dB}`,
+the gains actually applied to the two tracks at that seam (0.0 when
+`loudness_match=False`). The UI can show it as "track turned down 5.2 dB to
+match".
 
 ### Claude mood (optional)
 
