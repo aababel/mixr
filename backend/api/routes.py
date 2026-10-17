@@ -32,6 +32,7 @@ from backend.logic.calibration import (
     recommended_overlap_seconds,
     update_preference,
 )
+from backend.logic.explain import explain_order
 from backend.logic.ordering import order_tracks
 from backend.logic.scoring import score_pairs
 
@@ -85,6 +86,7 @@ class AnalyzeResponse(BaseModel):
 class OrderResponse(BaseModel):
     ordered_track_ids: list[str]
     scores: list[PairScore]
+    explanations: list[str]
 
 
 class MixRequest(BaseModel):
@@ -230,7 +232,12 @@ def _distinct_tracks(track_ids: list[str], minimum: int) -> list[Track]:
 def order(request: TrackIdsRequest):
     tracks = _distinct_tracks(request.track_ids, 1)
     scores = score_pairs(tracks)
-    return OrderResponse(ordered_track_ids=order_tracks(tracks, scores), scores=scores)
+    ordered_ids = order_tracks(tracks, scores)
+    return OrderResponse(
+        ordered_track_ids=ordered_ids,
+        scores=scores,
+        explanations=explain_order(tracks, scores, request.track_ids, ordered_ids),
+    )
 
 
 def _render_trial(outgoing: Track, incoming: Track) -> Trial:
@@ -252,11 +259,12 @@ def _render_trial(outgoing: Track, incoming: Track) -> Trial:
             ),
             paths[variant],
         )
+    # Votes record what was actually heard, so a clamped pair can't fake a preference.
     vote = Vote(
         from_id=outgoing.id,
         to_id=incoming.id,
-        a_requested_seconds=a_seconds,
-        b_requested_seconds=b_seconds,
+        a_requested_seconds=applied["A"].actual_overlap_seconds,
+        b_requested_seconds=applied["B"].actual_overlap_seconds,
         chosen="A",
     )
     return Trial(trial_id=trial_id, vote=vote, applied=applied, paths=paths)
