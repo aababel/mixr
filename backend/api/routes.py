@@ -38,7 +38,7 @@ from backend.logic.scoring import score_pairs
 router = APIRouter()
 
 ALLOWED_EXTENSIONS = {".mp3", ".wav"}
-MIN_TRACKS = 3
+MIN_TRACKS = 2
 MAX_TRACKS = 5
 MAX_FILE_BYTES = 50 * 1024 * 1024
 CHUNK_BYTES = 1024 * 1024

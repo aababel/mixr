@@ -41,9 +41,13 @@ def test_upload_returns_tracks_in_seconds(client, tmp_path):
     assert len(list(tmp_path.iterdir())) == 3
 
 
-@pytest.mark.parametrize("n", [2, 6])
+@pytest.mark.parametrize("n", [1, 6])
 def test_upload_rejects_wrong_count(client, n):
     assert client.post("/api/tracks", files=wav_files(n)).status_code == 400
+
+
+def test_upload_accepts_two_songs(client):
+    assert len(upload(client, n=2)["track_ids"]) == 2
 
 
 def test_upload_rejects_unsupported_extension(client):

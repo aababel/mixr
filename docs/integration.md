@@ -132,7 +132,7 @@ user skipped calibration.
 
 | Endpoint | Request | Response |
 | --- | --- | --- |
-| `POST /api/tracks` | multipart `files` (3–5) | `{track_ids, tracks}` |
+| `POST /api/tracks` | multipart `files` (2–5) | `{track_ids, tracks}` |
 | `GET /api/tracks/{id}` | | `Track` |
 | `GET /api/tracks/{id}/audio` | | audio file |
 | `POST /api/analyze` | `{track_ids}` | `{tracks}` |

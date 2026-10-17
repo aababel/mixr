@@ -2,7 +2,7 @@
 
 Your playlist. DJ'd by AI. Built at DubHacks 2026 by Shaan, Aarav, and Sahil.
 
-Pipeline: Upload (3–5 MP3/WAV) → Analyze → Score → Order → optional A/B calibration → Mix → Play/Download.
+Pipeline: Upload (2–5 MP3/WAV) → Analyze → Score → Order → optional A/B calibration → Mix → Play/Download.
 
 > Status: upload works end to end. Analyze and order return placeholder data; calibration and mix return 501 until the renderer lands.
 
