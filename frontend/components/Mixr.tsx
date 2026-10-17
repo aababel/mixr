@@ -24,7 +24,7 @@ import TrackCard from "./TrackCard";
 import Button from "./ui/Button";
 import LoadingPanel from "./ui/LoadingPanel";
 
-const MIN_TRACKS = 3;
+const MIN_TRACKS = 2;
 const MAX_TRACKS = 5;
 const ALLOWED_EXTENSIONS = [".mp3", ".wav"];
 const MIN_LOADING_MS = 700;

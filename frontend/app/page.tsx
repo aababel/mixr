@@ -8,7 +8,7 @@ import Vinyl from "@/components/ui/Vinyl";
 const STEPS = [
   {
     title: "Drop in your songs",
-    body: "Upload 3–5 MP3 or WAV files. Nothing to sign into.",
+    body: "Upload 2–5 MP3 or WAV files. Nothing to sign into.",
   },
   {
     title: "Mixr reads the music",
