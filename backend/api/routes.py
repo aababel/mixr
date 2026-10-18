@@ -259,11 +259,12 @@ def _render_trial(outgoing: Track, incoming: Track) -> Trial:
             ),
             paths[variant],
         )
+    # Votes record what was actually heard, so a clamped pair can't fake a preference.
     vote = Vote(
         from_id=outgoing.id,
         to_id=incoming.id,
-        a_requested_seconds=a_seconds,
-        b_requested_seconds=b_seconds,
+        a_requested_seconds=applied["A"].actual_overlap_seconds,
+        b_requested_seconds=applied["B"].actual_overlap_seconds,
         chosen="A",
     )
     return Trial(trial_id=trial_id, vote=vote, applied=applied, paths=paths)

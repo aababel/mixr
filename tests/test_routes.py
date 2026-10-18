@@ -114,6 +114,8 @@ def test_order_returns_every_track_once_with_scores(client):
     body = client.post("/api/order", json={"track_ids": ids}).json()
     assert sorted(body["ordered_track_ids"]) == sorted(ids)
     assert len(body["scores"]) == len(ids) * (len(ids) - 1)
+    # summary line + one line per transition
+    assert len(body["explanations"]) == len(ids)
 
 
 def test_order_returns_explanation(client):
@@ -151,6 +153,9 @@ def test_calibration_preview_and_vote(client):
     assert p == (0.5 if vote["chose_longer"] else -0.5)
     assert len(vote["preference"]["votes"]) == 1
     assert abs(vote["chosen_overlap_seconds"] - vote["other_overlap_seconds"]) >= 2.0
+    recorded = vote["preference"]["votes"][0]
+    assert recorded["a_requested_seconds"] == pytest.approx(vote["chosen_overlap_seconds"])
+    assert recorded["b_requested_seconds"] == pytest.approx(vote["other_overlap_seconds"])
 
 
 def test_calibration_next_trial_uses_next_seam(client):
