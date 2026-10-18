@@ -21,6 +21,7 @@ from backend.api.schemas import (
     PairScore,
     Preference,
     Track,
+    TrackWindow,
     TransitionRequest,
     Vote,
 )
@@ -35,6 +36,7 @@ from backend.logic.calibration import (
 from backend.logic.explain import OrderExplanation, explain_order
 from backend.logic.ordering import order_tracks
 from backend.logic.scoring import score_pairs
+from backend.logic.windows import DEFAULT_SET_SECONDS_PER_TRACK, choose_windows
 
 router = APIRouter()
 
@@ -95,6 +97,7 @@ class MixModeOptions(BaseModel):
     """Full mode plays every song; set mode trims each to its best part (docs/integration.md)."""
 
     mode: Literal["full", "set"] = "full"
+    # Set mode only; defaults to DEFAULT_SET_SECONDS_PER_TRACK per song.
     target_seconds: Optional[float] = Field(None, ge=MIN_SET_SECONDS, le=MAX_SET_SECONDS)
 
 
@@ -251,14 +254,26 @@ def order(request: TrackIdsRequest):
     )
 
 
-def _require_supported_mode(options: MixModeOptions) -> None:
+def _choose_windows(
+    tracks: list[Track], overlaps: list[float], options: MixModeOptions
+) -> list[TrackWindow]:
+    """Cue points for every song, in both modes (full mode = no target length)."""
+    target = None
     if options.mode == "set":
-        raise HTTPException(
-            501, "DJ set mode is on its way. For now, Mixr blends full songs."
-        )
+        target = options.target_seconds or DEFAULT_SET_SECONDS_PER_TRACK * len(tracks)
+        target = min(MAX_SET_SECONDS, max(MIN_SET_SECONDS, target))
+    try:
+        return choose_windows(tracks, overlaps, target)
+    except Exception as e:
+        raise HTTPException(500, f"Choosing cue points failed: {e}")
 
 
-def _render_trial(outgoing: Track, incoming: Track) -> Trial:
+def _render_trial(
+    outgoing: Track,
+    incoming: Track,
+    outgoing_window: TrackWindow | None = None,
+    incoming_window: TrackWindow | None = None,
+) -> Trial:
     trial_id = uuid.uuid4().hex[:12]
     previews_dir = storage_dir() / "previews"
     previews_dir.mkdir(exist_ok=True)
@@ -276,6 +291,8 @@ def _render_trial(outgoing: Track, incoming: Track) -> Trial:
                 from_id=outgoing.id, to_id=incoming.id, requested_overlap_seconds=seconds
             ),
             paths[variant],
+            outgoing_window=outgoing_window,
+            incoming_window=incoming_window,
         )
     # Votes record what was actually heard, so a clamped pair can't fake a preference.
     vote = Vote(
@@ -294,16 +311,19 @@ def _audible_gap(trial: Trial) -> float:
 
 @router.post("/calibration/preview", response_model=PreviewResponse)
 def calibration_preview(request: PreviewRequest):
-    _require_supported_mode(request)
     tracks = _distinct_tracks(request.ordered_track_ids, 2)
+    # The preference isn't known yet, so cue points use the neutral overlap:
+    # the windows the mix will play unless the votes lengthen its blends.
+    overlap = recommended_overlap_seconds(0.0)
+    windows = _choose_windows(tracks, [overlap] * (len(tracks) - 1), request)
     excluded = set(request.exclude_pairs)
-    seams = list(zip(tracks, tracks[1:]))
+    seams = list(zip(tracks, tracks[1:], windows, windows[1:]))
     start = request.trial % len(seams)
-    for outgoing, incoming in seams[start:] + seams[:start]:
+    for outgoing, incoming, out_window, in_window in seams[start:] + seams[:start]:
         if (outgoing.id, incoming.id) in excluded:
             continue
         try:
-            trial = _render_trial(outgoing, incoming)
+            trial = _render_trial(outgoing, incoming, out_window, in_window)
         except Exception as e:
             raise HTTPException(500, f"Preview failed: {e}")
         if _audible_gap(trial) >= MIN_AUDIBLE_OVERLAP_GAP_SECONDS:
@@ -360,9 +380,9 @@ def calibration_vote(request: VoteRequest):
 
 @router.post("/mix", response_model=MixResponse)
 def mix(request: MixRequest):
-    _require_supported_mode(request)
     tracks = _distinct_tracks(request.ordered_track_ids, 2)
-    overlap = recommended_overlap_seconds(request.overlap_preference)
+    overlaps = [recommended_overlap_seconds(request.overlap_preference)] * (len(tracks) - 1)
+    windows = _choose_windows(tracks, overlaps, request)
 
     mix_id = uuid.uuid4().hex[:12]
     mixes_dir = storage_dir() / "mixes"
@@ -373,10 +393,12 @@ def mix(request: MixRequest):
             mix_id=mix_id,
             tracks=tracks,
             paths=[get_track_path(t.id) for t in tracks],
-            overlap_seconds=[overlap] * (len(tracks) - 1),
+            overlap_seconds=overlaps,
             out_path=out_path,
             calibrated=request.calibrated,
             overlap_preference=request.overlap_preference,
+            windows=windows,
+            mode=request.mode,
         )
     except Exception as e:
         out_path.unlink(missing_ok=True)
