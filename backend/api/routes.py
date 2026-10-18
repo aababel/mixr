@@ -47,6 +47,9 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav"}
 MIN_TRACKS = 2
 MAX_TRACKS = 5
 MAX_FILE_BYTES = 50 * 1024 * 1024
+ANALYZE_BYTES_PER_TRACK = 1536 * 1024 * 1024  # peak memory of one full-song analysis, with margin
+CGROUP_MEMORY_LIMITS = (Path("/sys/fs/cgroup/memory.max"),
+                        Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
 CHUNK_BYTES = 1024 * 1024
 MIN_AUDIBLE_OVERLAP_GAP_SECONDS = 2.0
 MIN_SET_SECONDS = 120.0
@@ -234,12 +237,27 @@ def read_track_audio(track_id: str):
     return FileResponse(path, media_type=media_type, filename=get_track(track_id).filename)
 
 
+def _analyze_workers() -> int:
+    """Songs analyzed at once: MIXR_ANALYZE_WORKERS, else as many as the
+    container's memory limit fits (one on Railway when no limit is readable)."""
+    env = os.getenv("MIXR_ANALYZE_WORKERS")
+    if env:
+        return max(1, min(MAX_TRACKS, int(env)))
+    for path in CGROUP_MEMORY_LIMITS:
+        try:
+            limit = int(path.read_text().strip())
+        except (OSError, ValueError):
+            continue
+        return max(1, min(MAX_TRACKS, limit // ANALYZE_BYTES_PER_TRACK))
+    return 1 if os.getenv("RAILWAY_PROJECT_ID") else MAX_TRACKS
+
+
 @router.post("/analyze", response_model=AnalyzeResponse)
 def analyze(request: TrackIdsRequest):
     tracks = [get_track(tid) for tid in request.track_ids]
     pending = [t for t in tracks if t.analysis_status != "ok"]
     if pending:
-        with ThreadPoolExecutor(max_workers=MAX_TRACKS) as pool:
+        with ThreadPoolExecutor(max_workers=_analyze_workers()) as pool:
             for analyzed in pool.map(lambda t: analyze_track(_track_paths[t.id], t), pending):
                 _tracks[analyzed.id] = analyzed
     return AnalyzeResponse(tracks=[_tracks[tid] for tid in request.track_ids])

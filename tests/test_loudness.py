@@ -9,6 +9,7 @@ from backend.audio.loudness import (
     LoudnessSettings,
     _k_weighting,
     compute_track_gain,
+    file_loudness,
     integrated_loudness,
     track_gain_for_path,
 )
@@ -234,3 +235,14 @@ def test_level_preview_boost_respects_peak_ceiling():
     assert note and "peak headroom" in note
     silent, g0, n0 = level_preview(np.zeros((SR, 2), np.float32), SR)
     assert g0 == 0.0 and "not measurable" in n0
+
+
+def test_file_loudness_matches_in_memory_measurement(tmp_path):
+    rng = np.random.default_rng(7)
+    n = int(23.37 * RENDER_SR)  # not a whole number of chunks or hops
+    x = (rng.standard_normal((n, 2)) * np.linspace(0.02, 0.3, n)[:, None]).astype(np.float32)
+    p = tmp_path / "x.wav"
+    sf.write(p, x, RENDER_SR, subtype="FLOAT")
+    lufs, peak = file_loudness(p, chunk_seconds=3.0)
+    assert lufs == pytest.approx(integrated_loudness(x, RENDER_SR), abs=1e-6)
+    assert peak == pytest.approx(float(np.max(np.abs(x))))
