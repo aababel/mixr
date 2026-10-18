@@ -164,11 +164,28 @@ def test_calibration_next_trial_uses_next_seam(client):
     assert (trial["from_id"], trial["to_id"]) == (ids[1], ids[2])
 
 
+def test_calibration_never_repeats_a_compared_pair(client):
+    ids = client.post("/api/tracks", files=song_files()).json()["track_ids"]
+    first = [ids[0], ids[1]]
+    trial = client.post(
+        "/api/calibration/preview",
+        json={"ordered_track_ids": ids, "trial": 2, "exclude_pairs": [first]},
+    ).json()
+    assert [trial["from_id"], trial["to_id"]] == [ids[1], ids[2]]
+
+    res = client.post(
+        "/api/calibration/preview",
+        json={"ordered_track_ids": ids, "exclude_pairs": [first, [ids[1], ids[2]]]},
+    )
+    assert res.status_code == 422
+    assert "No more song pairs" in res.json()["detail"]
+
+
 def test_calibration_rejects_songs_too_short_to_compare(client):
     ids = upload(client)["track_ids"]
     res = client.post("/api/calibration/preview", json={"ordered_track_ids": ids})
     assert res.status_code == 422
-    assert "too short" in res.json()["detail"]
+    assert "wouldn't make an audible difference" in res.json()["detail"]
 
 
 def test_calibration_unknown_trial_404(client):

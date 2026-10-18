@@ -168,10 +168,15 @@ export function createMix(orderedTrackIds: string[], preference: Preference = NE
   });
 }
 
-export function previewCalibration(orderedTrackIds: string[], trial: number) {
+export function previewCalibration(
+  orderedTrackIds: string[],
+  trial: number,
+  excludePairs: [string, string][] = [],
+) {
   return postJson<CalibrationTrial>("/api/calibration/preview", {
     ordered_track_ids: orderedTrackIds,
     trial,
+    exclude_pairs: excludePairs,
   });
 }
 

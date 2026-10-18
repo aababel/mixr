@@ -98,6 +98,8 @@ class MixRequest(BaseModel):
 class PreviewRequest(BaseModel):
     ordered_track_ids: list[str]
     trial: int = Field(0, ge=0)
+    # (from_id, to_id) seams already compared; they are never offered again.
+    exclude_pairs: list[tuple[str, str]] = Field(default_factory=list)
 
 
 class PreviewVariant(BaseModel):
@@ -277,9 +279,12 @@ def _audible_gap(trial: Trial) -> float:
 @router.post("/calibration/preview", response_model=PreviewResponse)
 def calibration_preview(request: PreviewRequest):
     tracks = _distinct_tracks(request.ordered_track_ids, 2)
+    excluded = set(request.exclude_pairs)
     seams = list(zip(tracks, tracks[1:]))
     start = request.trial % len(seams)
     for outgoing, incoming in seams[start:] + seams[:start]:
+        if (outgoing.id, incoming.id) in excluded:
+            continue
         try:
             trial = _render_trial(outgoing, incoming)
         except Exception as e:
@@ -289,8 +294,12 @@ def calibration_preview(request: PreviewRequest):
         for path in trial.paths.values():
             path.unlink(missing_ok=True)
     else:
+        if excluded:
+            raise HTTPException(422, "No more song pairs left to compare")
         raise HTTPException(
-            422, "These songs are too short for the short and long previews to sound different"
+            422,
+            "Blend length wouldn't make an audible difference for these songs "
+            "(tempos too far apart for a long blend, or songs too short)",
         )
 
     trial_id = trial.trial_id
