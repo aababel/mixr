@@ -13,6 +13,22 @@ type Props = {
 
 const GAIN_EPSILON_DB = 0.05;
 
+/** How well the beats line up, read from the renderer's notes. */
+function beatLabel(notes: string[], tempoChange: number | null) {
+  const has = (text: string) => notes.some((n) => n.startsWith(text));
+  if (has("beat alignment skipped")) return null;
+  if (has("short blend")) return "Quick cut on the beat";
+  if (has("beat grid too irregular")) return "First beat aligned";
+  return tempoChange != null || has("beats matched") ? "Every beat locked" : "Beats aligned";
+}
+
+/** Short pill label; the renderer's full description goes under "Engine notes". */
+function eqLabel(eq: string) {
+  if (/lows/i.test(eq) && /highs/i.test(eq)) return "Bass + hi-hat swap";
+  const head = eq.split(":")[0].trim();
+  return head.charAt(0).toUpperCase() + head.slice(1);
+}
+
 function gainText(name: string, db: number | undefined) {
   if (db === undefined || Math.abs(db) < GAIN_EPSILON_DB) return null;
   return `${name} turned ${db < 0 ? "down" : "up"} ${Math.abs(db).toFixed(1)} dB`;
@@ -31,11 +47,12 @@ export default function TransitionCard({ blend, from, to, onPlay }: Props) {
   const t = blend.transition;
   const fromNumber = blend.index + 1;
   const toNumber = blend.index + 2;
-  const beatsAligned = !t.safety_adjustments.some((s) => s.startsWith("beat alignment skipped"));
+  const beats = beatLabel(t.safety_adjustments, t.tempo_change);
   const gains = [
     gainText(`Song ${fromNumber}`, t.applied_gain_db.outgoing),
     gainText(`Song ${toNumber}`, t.applied_gain_db.incoming),
   ].filter(Boolean);
+  const notes = t.applied_eq ? [t.applied_eq, ...t.safety_adjustments] : t.safety_adjustments;
 
   return (
     <li className="flex flex-col gap-3 rounded-2xl bg-white/[0.03] p-4">
@@ -60,26 +77,26 @@ export default function TransitionCard({ blend, from, to, onPlay }: Props) {
       </div>
 
       <div className="flex flex-wrap gap-2">
-        <Pill tone="neon">{t.actual_overlap_seconds.toFixed(1)}s blend</Pill>
-        {beatsAligned && <Pill>Beats aligned</Pill>}
+        <Pill tone="neon">{(blend.end - blend.start).toFixed(1)}s blend</Pill>
+        {beats && <Pill>{beats}</Pill>}
         {from?.bpm != null && to?.bpm != null && (
           <Pill>
             {Math.round(from.bpm)} → {Math.round(to.bpm)} BPM
           </Pill>
         )}
         {t.tempo_change != null && <Pill tone="neon">Tempo glide ×{t.tempo_change.toFixed(2)}</Pill>}
-        {t.applied_eq && <Pill tone="neon">{t.applied_eq.replaceAll("_", " ")}</Pill>}
+        {t.applied_eq && <Pill tone="neon">{eqLabel(t.applied_eq)}</Pill>}
         {gains.length > 0 && <Pill>Volume matched</Pill>}
         {t.overlap_changed_for_safety && <Pill tone="warn">Shortened to fit</Pill>}
       </div>
 
       {gains.length > 0 && <p className="text-xs text-neutral-400">{gains.join(" · ")}</p>}
 
-      {t.safety_adjustments.length > 0 && (
+      {notes.length > 0 && (
         <details className="text-xs text-neutral-500">
           <summary className="cursor-pointer select-none hover:text-neutral-300">Engine notes</summary>
           <ul className="mt-1 list-disc pl-5">
-            {t.safety_adjustments.map((s) => (
+            {notes.map((s) => (
               <li key={s}>{s}</li>
             ))}
           </ul>

@@ -13,23 +13,27 @@ export type Blend = { index: number; start: number; end: number; transition: App
 /** Where each track and each blend sits on the mix timeline, in seconds. */
 export function mixLayout(manifest: MixManifest) {
   const total = manifest.output_duration_seconds;
+  const { ordered_track_ids: ids, transitions, source_durations_seconds: durations } = manifest;
   const segments: Segment[] = [];
   const blends: Blend[] = [];
 
-  manifest.ordered_track_ids.forEach((id, i) => {
-    const previous = manifest.transitions[i - 1];
-    // outgoing_start_seconds is measured from the start of the outgoing track.
-    const start = i === 0 ? 0 : segments[i - 1].start + (previous?.outgoing_start_seconds ?? 0);
-    const end = Math.min(total, start + (manifest.source_durations_seconds[i] ?? 0));
-    segments.push({ id, index: i, start, end });
-    if (previous) {
-      blends.push({
-        index: i - 1,
-        start,
-        end: Math.min(total, start + previous.output_duration_seconds),
-        transition: previous,
-      });
+  let start = 0;
+  // A tempo glide stretches the head of the incoming track: its first
+  // actual_overlap_seconds of source audio last output_duration_seconds in the mix.
+  let headStretch = 0;
+  ids.forEach((id, i) => {
+    const next = transitions[i];
+    if (!next) {
+      segments.push({ id, index: i, start, end: Math.min(total, start + (durations[i] ?? 0) + headStretch) });
+      return;
     }
+    // outgoing_start_seconds is measured from the start of the outgoing track.
+    const blendStart = start + next.outgoing_start_seconds + headStretch;
+    const blendEnd = Math.min(total, blendStart + next.output_duration_seconds);
+    segments.push({ id, index: i, start, end: blendEnd });
+    blends.push({ index: i, start: blendStart, end: blendEnd, transition: next });
+    start = blendStart;
+    headStretch = next.output_duration_seconds - next.actual_overlap_seconds;
   });
 
   return { total, segments, blends };
