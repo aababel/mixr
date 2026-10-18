@@ -9,10 +9,11 @@ from pathlib import Path
 
 import soundfile as sf
 
-from backend.api.schemas import AppliedTransition, Track, TransitionRequest
+from backend.api.schemas import AppliedTransition, Track, TrackWindow, TransitionRequest
 from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.loudness import gain_notes, track_gain_for_path
 from backend.audio.transition import render_transition
+from backend.audio.windows import play
 
 PREVIEW_CONTEXT_SECONDS = 6.0
 
@@ -26,28 +27,36 @@ def render_preview(
     out_path: Path,
     *,
     loudness_match: bool = True,
+    outgoing_window: TrackWindow | None = None,
+    incoming_window: TrackWindow | None = None,
 ) -> AppliedTransition:
     """Write a short preview excerpt around the seam to out_path (WAV).
 
     loudness_match: apply each track's loudness gain (same as render_mix).
     applied_gain_db in the result records the gains actually used.
+    outgoing_window / incoming_window: the windows the mix will play (None =
+    whole track), so the preview is the seam the mix will contain. Times in
+    the result are measured from the start of each window.
     """
-    out_audio = load_render_audio(outgoing_path)
-    in_audio = load_render_audio(incoming_path)
+    out_p = play(load_render_audio(outgoing_path), outgoing, outgoing_window, RENDER_SR)
+    in_p = play(load_render_audio(incoming_path), incoming, incoming_window, RENDER_SR)
     g_out = g_in = None
     if loudness_match:
         g_out, g_in = track_gain_for_path(outgoing_path), track_gain_for_path(incoming_path)
     audio, applied = render_transition(
-        out_audio,
-        in_audio,
+        out_p.audio,
+        in_p.audio,
         RENDER_SR,
-        outgoing.beats_seconds,
-        incoming.beats_seconds,
+        out_p.beats,
+        in_p.beats,
         request,
         "preview",
         PREVIEW_CONTEXT_SECONDS,
         outgoing_gain_db=g_out.gain_db if g_out else 0.0,
         incoming_gain_db=g_in.gain_db if g_in else 0.0,
+        outgoing_melody=out_p.melody,
+        incoming_melody=in_p.melody,
+        melody_hop_seconds=outgoing.energy_hop_seconds,
     )
     if loudness_match:
         notes = gain_notes("outgoing", outgoing.id, g_out) + gain_notes("incoming", incoming.id, g_in)

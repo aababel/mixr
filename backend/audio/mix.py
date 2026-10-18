@@ -13,6 +13,16 @@ sides of a seam at 50% of their track, so the head and tail seams of a
 middle track never collide.
 The mix is streamed to disk, holding at most two decoded tracks at once.
 
+Windows (set mode, or trimmed full mode): with `windows`, each track plays
+only its window (windows.py). Seams blend the windows, every time in the
+transitions is measured from the start of the window, and
+source_durations_seconds are window lengths, so the timeline math is the
+same as without windows. A first window that starts mid-song fades in, a
+last one that ends mid-song fades out.
+
+Echo-out: each seam gets both tracks' melody_activity, so a seam where both
+sides carry a melody becomes an echo-out instead of a blend (echo.py).
+
 Loudness matching: each track gets one gain (loudness.py) applied to its
 whole body AND passed to render_transition for both of its seams, using the
 same float32 factor, so level is continuous across seam boundaries and the
@@ -23,11 +33,14 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from backend.api.schemas import AppliedTransition, MixManifest, Track, TransitionRequest
+from backend.api.schemas import (
+    AppliedTransition, MixManifest, MixMode, Track, TrackWindow, TransitionRequest,
+)
 from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.loudness import DEFAULT_LOUDNESS, TrackGain, gain_notes, track_gain_for_path
 from backend.audio.stretch import rubberband_available
 from backend.audio.transition import gain_factor, render_transition, seam_sample_bounds
+from backend.audio.windows import check_windows, edge_fades, play
 
 _CHUNK = RENDER_SR * 10  # scale and write long track bodies 10 s at a time
 
@@ -56,11 +69,15 @@ def render_mix(
     calibrated: bool = False,
     overlap_preference: float = 0.0,
     loudness_match: bool = True,
+    windows: list[TrackWindow] | None = None,
+    mode: MixMode | None = None,
 ) -> MixManifest:
     """Write the full mix to out_path (WAV). The manifest reports actual values.
 
     loudness_match: apply each track's loudness gain (same as render_preview).
     Each transition's applied_gain_db records the gains actually used.
+    windows: one per track, same order (None = every track whole, as before).
+    mode: recorded in the manifest; defaults to "set" with windows, else "full".
     """
     if len(tracks) < 1 or len(tracks) != len(paths):
         raise ValueError("tracks and paths must be non-empty and the same length")
@@ -68,6 +85,9 @@ def render_mix(
         raise ValueError(f"need {len(tracks) - 1} overlaps, got {len(overlap_seconds)}")
     if any(o <= 0 for o in overlap_seconds):
         raise ValueError("every requested overlap must be > 0 seconds")
+    if windows is not None:
+        check_windows(tracks, windows)
+    mode = mode or ("set" if windows is not None else "full")
 
     out_path = Path(out_path)
     if out_path.resolve() in {Path(p).resolve() for p in paths}:
@@ -78,6 +98,16 @@ def render_mix(
     durations: list[float] = []
     stats = {"frames": 0, "clipped": 0}
     gains: list[TrackGain | None] = []
+    used_windows: list[TrackWindow] = []
+    window_notes: list[str] = []
+    last_i = len(tracks) - 1
+
+    def load(i: int):
+        p = play(load_render_audio(paths[i]), tracks[i], windows[i] if windows else None, RENDER_SR)
+        audio, notes = edge_fades(p, tracks[i], RENDER_SR, i == 0, i == last_i)
+        used_windows.append(p.window)
+        window_notes.extend(notes)
+        return p, audio
 
     def gain_for(i: int) -> TrackGain | None:
         while len(gains) <= i:
@@ -89,16 +119,16 @@ def render_mix(
         return g.gain_db if g else 0.0
 
     with sf.SoundFile(str(out_path), "w", RENDER_SR, 2, subtype="PCM_16") as f:
-        current = load_render_audio(paths[0])
+        cur_p, current = load(0)
         head = 0  # samples of `current` already consumed by the previous seam
         for i, track in enumerate(tracks):
             durations.append(current.shape[0] / RENDER_SR)
-            if i == len(tracks) - 1:
+            if i == last_i:
                 _write(f, current[head:], stats, db(i))
                 break
 
             nxt_track = tracks[i + 1]
-            nxt = load_render_audio(paths[i + 1])
+            nxt_p, nxt = load(i + 1)
             request = TransitionRequest(
                 from_id=track.id,
                 to_id=nxt_track.id,
@@ -106,9 +136,11 @@ def render_mix(
             )
             seam, applied = render_transition(
                 current, nxt, RENDER_SR,
-                track.beats_seconds, nxt_track.beats_seconds,
+                cur_p.beats, nxt_p.beats,
                 request, "final",
                 outgoing_gain_db=db(i), incoming_gain_db=db(i + 1),
+                outgoing_melody=cur_p.melody, incoming_melody=nxt_p.melody,
+                melody_hop_seconds=track.energy_hop_seconds,
             )
             if loudness_match:
                 notes = (gain_notes("outgoing", track.id, gain_for(i))
@@ -124,7 +156,7 @@ def render_mix(
             _write(f, current[head:o_start], stats, db(i))
             _write(f, seam, stats)  # gain already applied inside the seam
             transitions.append(applied)
-            current, head = nxt, ov
+            current, cur_p, head = nxt, nxt_p, ov
 
     if loudness_match:
         limitations = [
@@ -155,6 +187,14 @@ def render_mix(
         limitations.append("Rubber Band not installed: no tempo glide on any seam")
     if stats["clipped"]:
         limitations.append(f"{stats['clipped']} samples clipped to [-1, 1] when writing 16-bit WAV")
+    echo = [f"{t.from_id}->{t.to_id}" for t in transitions
+            if t.applied_eq and t.applied_eq.startswith("echo-out")]
+    if echo:
+        limitations.append(
+            f"echo-out instead of a blend at {', '.join(echo)}: both songs have lead melody "
+            "at the seam, so the requested overlap was not used"
+        )
+    limitations.extend(window_notes)
     missing_beats = [t.id for t in tracks if not t.beats_seconds]
     if missing_beats:
         limitations.append(f"no beat grid for {', '.join(missing_beats)}; those seams are not beat-aligned")
@@ -168,4 +208,6 @@ def render_mix(
         calibrated=calibrated,
         overlap_preference=overlap_preference,
         limitations=limitations,
+        mode=mode,
+        windows=used_windows if windows is not None else [],
     )

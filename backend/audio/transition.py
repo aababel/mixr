@@ -37,6 +37,12 @@ Processing actually performed (and recorded in AppliedTransition):
      midpoint, highs at ~30%, mids crossfade with fade_style. Recorded in
      applied_eq.
   6. Soft limiter on the seam only if its peak exceeds the threshold.
+
+Echo-out (echo.py): when melody data is passed and BOTH sides carry lead
+melody at the seam (outgoing's last 8 s, incoming's first 8 s), steps 2-5
+are replaced by an echo-out: A plays its last bar with the bass filtered
+out, its last beat echoes, and B drops on a downbeat at A's bar line.
+The requested overlap is not used, so both A/B previews are identical.
 """
 from dataclasses import dataclass
 
@@ -44,6 +50,7 @@ import numpy as np
 
 from backend.api.schemas import AppliedTransition, RenderMode, TransitionRequest
 from backend.audio.bands import band_swap
+from backend.audio.echo import MELODY_CLASH, melody_clash, plan_echo_out, render_echo_out
 from backend.audio.edges import fade_in_seconds, fade_out_seconds
 from backend.audio.seam_plan import (
     GRID_WINDOW_MARGIN_SECONDS, MAX_GLIDE_DEVIATION, SeamPlan, beat_period, deviation,
@@ -329,6 +336,9 @@ def render_transition(
     safety: SafetyLimits = DEFAULT_SAFETY,
     outgoing_gain_db: float = 0.0,
     incoming_gain_db: float = 0.0,
+    outgoing_melody: list[float] | None = None,
+    incoming_melody: list[float] | None = None,
+    melody_hop_seconds: float | None = None,
 ) -> tuple[np.ndarray, AppliedTransition]:
     """Render the seam between two tracks.
 
@@ -343,6 +353,11 @@ def render_transition(
     outgoing_gain_db / incoming_gain_db: whole-track gain for each side,
     recorded as applied_gain_db. Pass the same value for a track at both of
     its seams and in its preview.
+
+    outgoing_melody / incoming_melody: Track.melody_activity of each side
+    (already sliced to the played window), on a melody_hop_seconds grid.
+    When both edges are melodic the seam is an echo-out (echo.py). Leave
+    them None to never echo out.
 
     In the result, actual_overlap_seconds is how much of the INCOMING track
     plays inside the seam (what mix.py skips afterwards). With a tempo glide
@@ -382,6 +397,87 @@ def render_transition(
                      f"tracks too short to fit them")
         head = tail = 0.0
         hi_all = hi
+    g_out, g_in = gain_factor(outgoing_gain_db), gain_factor(incoming_gain_db)
+    clash, mel_a, mel_b = (melody_clash(outgoing_melody, incoming_melody, melody_hop_seconds,
+                                        out_dur, tail, head)
+                           if request.beat_align else (False, None, None))
+    if mel_a is not None and mel_b is not None:
+        notes.append(f"melody at the seam: outgoing {mel_a:.2f}, incoming {mel_b:.2f} "
+                     f"(echo-out when both >= {MELODY_CLASH})")
+    if clash:
+        seam, plan, eq_desc = _echo_out(out, inc, sr, list(outgoing_beats_seconds),
+                                        list(incoming_beats_seconds), safety, g_out, g_in)
+        notes.extend(plan.notes)
+        notes.append(f"requested overlap not used: both sides have lead melody at the seam, "
+                     f"so the blend would play two melodies at once")
+        changed_for_safety = True
+        region = None
+    else:
+        seam, plan, eq_desc, region = _blend(
+            out, inc, sr, outgoing_beats_seconds, incoming_beats_seconds, request,
+            clamped, lo, hi, notes, head, tail, hi_all, g_out, g_in)
+    o_start, in_cons, seam_len = plan.o_start, plan.in_consumed, plan.seam_len
+
+    # 6. soft limiter, only when needed
+    peak = float(np.max(np.abs(seam)))
+    if peak > safety.limiter_threshold:
+        seam = _soft_limit(seam, safety.limiter_threshold)
+        new_peak = float(np.max(np.abs(seam)))
+        notes.append(
+            f"soft limiter on seam: peak {peak:.3f} -> {new_peak:.3f} "
+            f"(threshold {safety.limiter_threshold})"
+        )
+    seam = seam.astype(np.float32)
+
+    if mode == "final":
+        audio = seam
+    else:
+        ctx = int(round(max(0.0, preview_context_seconds) * sr))
+        pre = out[max(0, o_start - ctx):o_start] * g_out
+        post = inc[in_cons:in_cons + ctx] * g_in
+        audio = np.concatenate([pre, seam, post], axis=0).astype(np.float32)
+
+    actual = in_cons / sr
+    adjust = 0.0
+    if plan.kind not in ("plain", "echo_out"):
+        adjust = actual - clamped - (head + tail if region else 0.0)
+    applied = AppliedTransition(
+        from_id=request.from_id,
+        to_id=request.to_id,
+        mode=mode,
+        fade_style=request.fade_style,
+        requested_overlap_seconds=requested,
+        actual_overlap_seconds=actual,
+        overlap_changed_for_safety=changed_for_safety,
+        outgoing_start_seconds=o_start / sr,
+        incoming_start_seconds=0.0,
+        beat_alignment_adjustments_seconds=adjust,
+        applied_gain_db={"outgoing": float(outgoing_gain_db), "incoming": float(incoming_gain_db)},
+        applied_eq=eq_desc,
+        tempo_change=plan.tempo_ratio if plan.warped else None,
+        safety_adjustments=notes,
+        output_duration_seconds=audio.shape[0] / sr,
+    )
+    return audio, applied
+
+
+def _echo_out(out, inc, sr, out_beats, in_beats, safety, g_out, g_in):
+    """Echo-out seam (echo.py): (seam, plan, eq description)."""
+    out_dur, in_dur = out.shape[0] / sr, inc.shape[0] / sr
+    grid_out, _ = _grid(out, sr, out_beats, max(0.0, out_dur - 20.0), out_dur)
+    grid_in, _ = _grid(inc, sr, in_beats, 0.0, min(in_dur, 20.0))
+    first = grid_in.first if grid_in is not None else (in_beats[0] if in_beats else 0.0)
+    plan = plan_echo_out(out.shape[0], inc.shape[0], sr, grid_out, first,
+                         safety.max_fraction_of_track)
+    seam = render_echo_out(out, inc, sr, plan, g_out, g_in)
+    eq = ("echo-out: outgoing lows (<200 Hz) ramped out over its last bar; last beat echoed "
+          "4x on a 1-beat delay, high-passed at 300 Hz, each repeat 6 dB quieter")
+    return seam, plan, eq
+
+
+def _blend(out, inc, sr, outgoing_beats_seconds, incoming_beats_seconds, request,
+           clamped, lo, hi, notes, head, tail, hi_all, g_out, g_in):
+    """Normal beat-matched blend (steps 2-5): (seam, plan, eq description, region)."""
     plan = _plan_seam(out, inc, sr, list(outgoing_beats_seconds),
                       list(incoming_beats_seconds), request, clamped, lo, hi, notes,
                       head, tail, hi_all)
@@ -411,52 +507,11 @@ def render_transition(
         notes.append(f"time-warped with {engine_name()} time map")
 
     # 4. per-track gain, 5. split-frequency swap with the mids crossfaded
-    g_out, g_in = gain_factor(outgoing_gain_db), gain_factor(incoming_gain_db)
     fade_out, fade_in = _fades(seam_len, request.fade_style, region)
     blend, eq_desc = band_swap(out_seg * g_out, in_seg * g_in, sr, plan.beats, fade_out, fade_in,
                                region)
     eq_desc = eq_desc.replace("mids crossfaded", f"mids {request.fade_style} crossfade")
-    seam = blend.astype(np.float32)
-
-    # 6. soft limiter, only when needed
-    peak = float(np.max(np.abs(seam)))
-    if peak > safety.limiter_threshold:
-        seam = _soft_limit(seam, safety.limiter_threshold)
-        new_peak = float(np.max(np.abs(seam)))
-        notes.append(
-            f"soft limiter on seam: peak {peak:.3f} -> {new_peak:.3f} "
-            f"(threshold {safety.limiter_threshold})"
-        )
-    seam = seam.astype(np.float32)
-
-    if mode == "final":
-        audio = seam
-    else:
-        ctx = int(round(max(0.0, preview_context_seconds) * sr))
-        pre = out[max(0, o_start - ctx):o_start] * g_out
-        post = inc[in_cons:in_cons + ctx] * g_in
-        audio = np.concatenate([pre, seam, post], axis=0).astype(np.float32)
-
-    actual = in_cons / sr
-    applied = AppliedTransition(
-        from_id=request.from_id,
-        to_id=request.to_id,
-        mode=mode,
-        fade_style=request.fade_style,
-        requested_overlap_seconds=requested,
-        actual_overlap_seconds=actual,
-        overlap_changed_for_safety=changed_for_safety,
-        outgoing_start_seconds=o_start / sr,
-        incoming_start_seconds=0.0,
-        beat_alignment_adjustments_seconds=(
-            actual - clamped - (head + tail if region else 0.0)) if plan.kind != "plain" else 0.0,
-        applied_gain_db={"outgoing": float(outgoing_gain_db), "incoming": float(incoming_gain_db)},
-        applied_eq=eq_desc,
-        tempo_change=plan.tempo_ratio if plan.warped else None,
-        safety_adjustments=notes,
-        output_duration_seconds=audio.shape[0] / sr,
-    )
-    return audio, applied
+    return blend.astype(np.float32), plan, eq_desc, region
 
 
 def seam_sample_bounds(applied: AppliedTransition, sr: int) -> tuple[int, int]:
