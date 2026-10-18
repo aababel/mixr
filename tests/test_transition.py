@@ -3,8 +3,7 @@ import pytest
 
 from backend.api.schemas import TransitionRequest
 from backend.audio.bands import MID_UNDER
-from backend.audio.transition import SafetyLimits, render_transition, seam_sample_bounds
-from backend.logic.windows import overlap_limits
+from backend.audio.transition import SafetyLimits, _soft_limit, render_transition, seam_sample_bounds
 from backend.logic.windows import overlap_limits
 
 SR = 22050
@@ -217,6 +216,19 @@ def test_limiter_fires_and_is_recorded():
     assert any("soft limiter" in s for s in ap.safety_adjustments)
     assert ap.applied_gain_db == {"outgoing": 0.0, "incoming": 0.0}
     assert ap.applied_eq.startswith("3-band swap") and ap.tempo_change is None
+
+
+def test_limiter_turns_peaks_down_without_clipping():
+    t = np.arange(int(2 * SR)) / SR
+    sine = np.sin(2 * np.pi * 220 * t).astype(np.float32)
+    x = np.stack([1.3 * sine, 1.3 * sine], axis=1)
+    y = _soft_limit(x, 0.9, SR)
+    edge = int(0.01 * SR)
+    assert np.max(np.abs(y[edge:-edge])) <= 0.9 + 1e-6
+    body = slice(SR // 2, 3 * SR // 2)
+    # a steady loud sine is only scaled, so it stays a sine
+    ratio = y[body, 0] / (1.3 * sine[body] + 1e-9)
+    assert np.std(ratio[np.abs(sine[body]) > 0.1]) < 1e-3
 
 
 def test_quiet_seam_not_limited(pair):
