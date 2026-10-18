@@ -68,6 +68,45 @@ starts in the mix.
 
 Used by `POST /api/mix`.
 
+### Transition quality (`transition.py`, `seam_plan.py`, `bands.py`, `stretch.py`)
+
+Routes need no change. Every seam (A/B previews and the final mix) now:
+
+- **Matches beats beat-for-beat** over a whole number of bars (multiple of 4
+  beats) near the requested overlap. Each side's grid is locked to the kicks
+  in the audio near the seam (tempo seeded from `beats_seconds`), because on
+  real songs the beat tracker's phase can jump by a quarter beat or more
+  within a section. Without a clear kick it falls back to a robust fit of
+  `beats_seconds`. The source is noted in `safety_adjustments`.
+- **Glides the tempo** when the two tempos differ: inside the blend, Rubber
+  Band warps the outgoing song from its tempo to the incoming tempo, and the
+  incoming song from the outgoing tempo to its own, so every beat lands
+  together. `tempo_change` = incoming/outgoing tempo ratio (e.g. 0.93 for
+  138 -> 128 BPM), `null` when nothing was warped.
+- **Falls back to a short ~2-beat blend** ending on an incoming beat when the
+  tempos differ by more than 12% after half/double folding (e.g. 90 BPM rap
+  into 128 BPM house), or when Rubber Band is not installed. The requested
+  overlap is not used there, so both A/B previews of such a seam are the same
+  length.
+- **Swaps frequency bands**: lows (<200 Hz) at the midpoint, highs (>5 kHz)
+  at ~30%, mids crossfade with `fade_style`. Described in `applied_eq`.
+
+Field meanings with a glide (no schema change):
+
+| Field | Meaning |
+| --- | --- |
+| `actual_overlap_seconds` | how much of the incoming track plays inside the blend (where the next track resumes) |
+| `output_duration_seconds` (final mode) | how long the blend lasts in the mix |
+| `outgoing_start_seconds` | where the blend starts in the outgoing track (unchanged) |
+
+Without a glide the first two are equal, as before. Where song *i+1* starts
+in the mix: `start[i+1] = start[i] + outgoing_start_seconds[i] +
+(output_duration_seconds[i-1] - actual_overlap_seconds[i-1])`, with the last
+term 0 for the first seam.
+
+Deployment: needs the `rubberband` binary (`apt-get install rubberband-cli`
+or `brew install rubberband`). No new Python packages.
+
 ### Loudness matching (`loudness.py`)
 
 On by default in both `render_preview` and `render_mix`; routes need no
@@ -132,7 +171,7 @@ user skipped calibration.
 
 | Endpoint | Request | Response |
 | --- | --- | --- |
-| `POST /api/tracks` | multipart `files` (2–5) | `{track_ids, tracks}` |
+| `POST /api/tracks` | multipart `files` (3–5) | `{track_ids, tracks}` |
 | `GET /api/tracks/{id}` | | `Track` |
 | `GET /api/tracks/{id}/audio` | | audio file |
 | `POST /api/analyze` | `{track_ids}` | `{tracks}` |

@@ -114,8 +114,18 @@ def test_order_returns_every_track_once_with_scores(client):
     body = client.post("/api/order", json={"track_ids": ids}).json()
     assert sorted(body["ordered_track_ids"]) == sorted(ids)
     assert len(body["scores"]) == len(ids) * (len(ids) - 1)
-    # summary line + one line per transition
-    assert len(body["explanations"]) == len(ids)
+
+
+def test_order_returns_explanation(client):
+    ids = upload(client)["track_ids"]
+    client.post("/api/analyze", json={"track_ids": ids})
+    body = client.post("/api/order", json={"track_ids": ids}).json()
+    explanation = body["explanation"]
+    assert explanation["summary"].startswith(("Reordered", "Kept your order"))
+    ordered = body["ordered_track_ids"]
+    transitions = explanation["transitions"]
+    assert [(t["from_id"], t["to_id"]) for t in transitions] == list(zip(ordered, ordered[1:]))
+    assert all(t["reasons"] and 0.0 <= t["score"] <= 1.0 for t in transitions)
 
 
 def test_unknown_track_ids_404(client):

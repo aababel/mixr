@@ -32,7 +32,7 @@ from backend.logic.calibration import (
     recommended_overlap_seconds,
     update_preference,
 )
-from backend.logic.explain import explain_order
+from backend.logic.explain import OrderExplanation, explain_order
 from backend.logic.ordering import order_tracks
 from backend.logic.scoring import score_pairs
 
@@ -86,7 +86,7 @@ class AnalyzeResponse(BaseModel):
 class OrderResponse(BaseModel):
     ordered_track_ids: list[str]
     scores: list[PairScore]
-    explanations: list[str]
+    explanation: OrderExplanation
 
 
 class MixRequest(BaseModel):
@@ -232,11 +232,11 @@ def _distinct_tracks(track_ids: list[str], minimum: int) -> list[Track]:
 def order(request: TrackIdsRequest):
     tracks = _distinct_tracks(request.track_ids, 1)
     scores = score_pairs(tracks)
-    ordered_ids = order_tracks(tracks, scores)
+    ordered = order_tracks(tracks, scores)
     return OrderResponse(
-        ordered_track_ids=ordered_ids,
+        ordered_track_ids=ordered,
         scores=scores,
-        explanations=explain_order(tracks, scores, request.track_ids, ordered_ids),
+        explanation=explain_order(tracks, scores, request.track_ids, ordered),
     )
 
 

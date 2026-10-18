@@ -3,10 +3,14 @@
 Every seam goes through render_transition(mode="final"), the same code the
 A/B previews use. Every track is written in full; only the seams overlap:
 
-    t0[:end0] + seam0 + t1[ov0:end1] + seam1 + t2[ov1:] ...
+    t0[:start0] + seam0 + t1[ov0:start1] + seam1 + t2[ov1:] ...
 
-where end_i = len(t_i) - ov_i. The renderer caps each overlap at 50% of
-either track, so the head and tail seams of a middle track never collide.
+where start_i is where seam i begins in track i and ov_i is how many
+incoming samples seam i consumed (seam_sample_bounds). With a tempo glide
+the seam's own length differs from ov_i; that is fine, because each seam is
+written whole and the next track resumes at ov_i. The renderer caps both
+sides of a seam at 50% of their track, so the head and tail seams of a
+middle track never collide.
 The mix is streamed to disk, holding at most two decoded tracks at once.
 
 Loudness matching: each track gets one gain (loudness.py) applied to its
@@ -22,6 +26,7 @@ import soundfile as sf
 from backend.api.schemas import AppliedTransition, MixManifest, Track, TransitionRequest
 from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.loudness import DEFAULT_LOUDNESS, TrackGain, gain_notes, track_gain_for_path
+from backend.audio.stretch import rubberband_available
 from backend.audio.transition import gain_factor, render_transition, seam_sample_bounds
 
 _CHUNK = RENDER_SR * 10  # scale and write long track bodies 10 s at a time
@@ -134,7 +139,20 @@ def render_mix(
             limitations.append(f"{tracks[0].id}: {gains[0].note}")
     else:
         limitations = ["no loudness normalization between tracks (0 dB gain)"]
-    limitations.append("no EQ or tempo change applied")
+    short = [f"{t.from_id}->{t.to_id}" for t in transitions
+             if any(n.startswith("short blend") for n in t.safety_adjustments)]
+    if short:
+        limitations.append(
+            f"short 2-beat blend instead of the requested overlap at {', '.join(short)} "
+            "(tempos too far apart to glide, or Rubber Band not installed)"
+        )
+    unmatched = [f"{t.from_id}->{t.to_id}" for t in transitions
+                 if any("beat alignment skipped" in n or "only the first beat" in n
+                        for n in t.safety_adjustments)]
+    if unmatched:
+        limitations.append(f"beats not matched beat-for-beat at {', '.join(unmatched)}")
+    if transitions and not rubberband_available():
+        limitations.append("Rubber Band not installed: no tempo glide on any seam")
     if stats["clipped"]:
         limitations.append(f"{stats['clipped']} samples clipped to [-1, 1] when writing 16-bit WAV")
     missing_beats = [t.id for t in tracks if not t.beats_seconds]
