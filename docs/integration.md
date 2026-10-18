@@ -179,7 +179,9 @@ def order_tracks(tracks: list[Track], scores: list[PairScore]) -> list[str]:
     """Return every track id exactly once, best path first."""
 ```
 
-`POST /api/order` calls `score_pairs` then `order_tracks`.
+`POST /api/order` calls `score_pairs` then `order_tracks`. With `keep_order: true`
+it keeps `track_ids` as the user arranged them and explains that order with
+`explain_user_order`, scored against Mixr's pick (`suggested_track_ids`).
 
 ### `calibration.py`
 
@@ -445,7 +447,7 @@ How the implementation decides (constants at the top of the module):
 | `GET /api/tracks/{id}` | | `Track` |
 | `GET /api/tracks/{id}/audio` | | audio file |
 | `POST /api/analyze` | `{track_ids}` | `{tracks}` |
-| `POST /api/order` | `{track_ids}` | `{ordered_track_ids, scores, explanation}` |
+| `POST /api/order` | `{track_ids, keep_order?}` | `{ordered_track_ids, suggested_track_ids, scores, explanation}` |
 | `POST /api/calibration/preview` | `{ordered_track_ids, trial, mode?, target_seconds?}` | `{trial_id, from_id, to_id, a, b}`, each `{audio_url}` |
 | `GET /api/calibration/previews/{trial_id}/{a\|b}` | | preview WAV |
 | `POST /api/calibration/vote` | `{trial_id, chosen, preference}` | `{preference, chosen_overlap_seconds, other_overlap_seconds, chose_longer}` |

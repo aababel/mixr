@@ -166,12 +166,14 @@ export function analyzeTracks(trackIds: string[]) {
   return postJson<{ tracks: Track[] }>("/api/analyze", { track_ids: trackIds });
 }
 
-export function orderTracks(trackIds: string[]) {
+/** keepOrder: explain trackIds as given instead of reordering them. */
+export function orderTracks(trackIds: string[], keepOrder = false) {
   return postJson<{
     ordered_track_ids: string[];
+    suggested_track_ids: string[];
     scores: PairScore[];
     explanation: OrderExplanation;
-  }>("/api/order", { track_ids: trackIds });
+  }>("/api/order", { track_ids: trackIds, keep_order: keepOrder });
 }
 
 /** "full" plays every song; "set" trims each song to its best part to hit a target length. */

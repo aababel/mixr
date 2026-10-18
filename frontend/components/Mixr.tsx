@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   ApiError,
@@ -61,10 +61,14 @@ const HEADINGS: Record<Exclude<Stage, "tuning" | "mixed">, { title: string; deta
     detail: `Pick ${MIN_TRACKS} to ${MAX_TRACKS} songs you want blended together.`,
   },
   uploaded: { title: "Your tracks", detail: "Next, Mixr analyzes each song." },
-  analyzed: { title: "Analyzed", detail: "Next, Mixr finds the order that flows best." },
+  analyzed: {
+    title: "Analyzed",
+    detail: "Next, Mixr finds the order that flows best, or drag the songs into your own.",
+  },
   ordered: {
     title: "Your running order",
-    detail: "Tune the transitions to your taste in a few quick comparisons, or mix right away.",
+    detail:
+      "Drag to rearrange if you want, then tune the transitions in a few quick comparisons or mix right away.",
   },
 };
 
@@ -93,6 +97,10 @@ export default function Mixr() {
   const [files, setFiles] = useState<File[]>([]);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [explanation, setExplanation] = useState<Explanation | null>(null);
+  const [explainedOrder, setExplainedOrder] = useState<string | null>(null);
+  const [suggestedIds, setSuggestedIds] = useState<string[] | null>(null);
+  const [dragFrom, setDragFrom] = useState<number | null>(null);
+  const [dragOver, setDragOver] = useState<number | null>(null);
   const [mixResult, setMixResult] = useState<Mix | null>(null);
   const [preference, setPreference] = useState<Preference>(NEUTRAL_PREFERENCE);
   const [firstTrial, setFirstTrial] = useState<CalibrationTrial | null>(null);
@@ -138,14 +146,53 @@ export default function Mixr() {
       setStage("analyzed");
     });
 
-  const order = () =>
+  const order = (keepMine = false) =>
     run("order", async () => {
-      const res = await orderTracks(trackIds);
+      const res = await orderTracks(trackIds, keepMine);
       const byId = new Map(tracks.map((t) => [t.id, t]));
       setTracks(res.ordered_track_ids.map((id) => byId.get(id)!));
+      setSuggestedIds(res.suggested_track_ids);
       setExplanation(res.explanation);
+      setExplainedOrder(res.ordered_track_ids.join());
       setStage("ordered");
     });
+
+  // Re-explain the order in place (no loading panel) whenever the user rearranges it.
+  const orderKey = trackIds.join();
+  useEffect(() => {
+    if (stage !== "ordered" || explainedOrder === null || explainedOrder === orderKey) return;
+    let stale = false;
+    orderTracks(orderKey.split(","), true)
+      .then((res) => {
+        if (stale) return;
+        setExplanation(res.explanation);
+        setExplainedOrder(orderKey);
+      })
+      .catch((e) => {
+        if (!stale) setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      stale = true;
+    };
+  }, [stage, orderKey, explainedOrder]);
+
+  function moveTrack(from: number, to: number) {
+    if (from === to || to < 0 || to >= tracks.length) return;
+    const next = [...tracks];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setTracks(next);
+  }
+
+  function restoreMixrOrder() {
+    if (!suggestedIds) return;
+    const byId = new Map(tracks.map((t) => [t.id, t]));
+    setTracks(suggestedIds.map((id) => byId.get(id)!));
+  }
+
+  const canReorder = (stage === "analyzed" || stage === "ordered") && !job;
+  const isCustomOrder =
+    stage === "ordered" && suggestedIds !== null && suggestedIds.join() !== trackIds.join();
 
   const tune = () =>
     run("preview", async () => {
@@ -174,6 +221,8 @@ export default function Mixr() {
     setFiles([]);
     setTracks([]);
     setExplanation(null);
+    setExplainedOrder(null);
+    setSuggestedIds(null);
     setMixResult(null);
     setPreference(NEUTRAL_PREFERENCE);
     setMixOptions(FULL_SONGS);
@@ -186,7 +235,7 @@ export default function Mixr() {
 
   const nextAction = {
     uploaded: { label: "Analyze tracks", onClick: analyze },
-    analyzed: { label: "Find the best order", onClick: order },
+    analyzed: { label: "Find the best order", onClick: () => order() },
     ordered: { label: "Tune my transitions", onClick: tune },
   }[stage as "uploaded" | "analyzed" | "ordered"];
 
@@ -239,14 +288,44 @@ export default function Mixr() {
       ) : (
         <section className="flex flex-col gap-4">
           {stage === "ordered" && explanation && (
-            <OrderExplanation explanation={explanation} tracks={tracks} />
+            <OrderExplanation
+              explanation={explanation}
+              tracks={tracks}
+              onReset={isCustomOrder ? restoreMixrOrder : undefined}
+            />
           )}
           {stage === "mixed" && mixResult ? (
             <MixResult mix={mixResult} tracks={tracks} />
           ) : (
             <ul className="flex flex-col gap-3">
               {tracks.map((track, i) => (
-                <TrackCard key={track.id} track={track} position={i + 1} />
+                <TrackCard
+                  key={track.id}
+                  track={track}
+                  position={i + 1}
+                  reorder={
+                    canReorder
+                      ? {
+                          canUp: i > 0,
+                          canDown: i < tracks.length - 1,
+                          onMove: (delta) => moveTrack(i, i + delta),
+                          onDragStart: () => setDragFrom(i),
+                          onDragEnter: () => setDragOver(i),
+                          onDrop: () => {
+                            if (dragFrom !== null) moveTrack(dragFrom, i);
+                            setDragFrom(null);
+                            setDragOver(null);
+                          },
+                          onDragEnd: () => {
+                            setDragFrom(null);
+                            setDragOver(null);
+                          },
+                          dragging: dragFrom === i,
+                          dropTarget: dragFrom !== null && dragOver === i && dragFrom !== i,
+                        }
+                      : undefined
+                  }
+                />
               ))}
             </ul>
           )}
@@ -264,6 +343,11 @@ export default function Mixr() {
             {nextAction && (
               <Button onClick={nextAction.onClick} className="flex-1">
                 {nextAction.label}
+              </Button>
+            )}
+            {stage === "analyzed" && (
+              <Button variant="ghost" onClick={() => order(true)}>
+                Use my order
               </Button>
             )}
             {stage === "ordered" && (

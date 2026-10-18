@@ -152,3 +152,28 @@ def explain_order(
             for a, b in zip(ordered_ids, ordered_ids[1:])
         ],
     )
+
+
+def explain_user_order(
+    tracks: list[Track],
+    scores: list[PairScore],
+    suggested_ids: list[str],
+    ordered_ids: list[str],
+) -> OrderExplanation:
+    """The user's own order, explained as-is and scored against Mixr's pick."""
+    explanation = explain_order(tracks, scores, suggested_ids, ordered_ids)
+    if not explanation.transitions:
+        return explanation
+    matrix = {(s.from_id, s.to_id): s for s in scores}
+    after = _average_flow(ordered_ids, matrix)
+    if list(ordered_ids) == list(suggested_ids):
+        summary = f"Your order is Mixr's pick too (average score {after:.0%})."
+    elif all(p in matrix for p in zip(suggested_ids, suggested_ids[1:])):
+        best = _average_flow(suggested_ids, matrix)
+        if after >= best - 1e-9:
+            summary = f"Your order flows as well as Mixr's pick (average score {after:.0%})."
+        else:
+            summary = f"Your order: average score {after:.0%} (Mixr's pick scores {best:.0%})."
+    else:
+        summary = f"Your order (average score {after:.0%})."
+    return explanation.model_copy(update={"summary": summary})

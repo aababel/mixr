@@ -128,6 +128,18 @@ def test_order_returns_explanation(client):
     assert all(t["reasons"] and 0.0 <= t["score"] <= 1.0 for t in transitions)
 
 
+def test_order_can_keep_the_users_order(client):
+    ids = upload(client)["track_ids"]
+    client.post("/api/analyze", json={"track_ids": ids})
+    mine = ids[::-1]
+    body = client.post("/api/order", json={"track_ids": mine, "keep_order": True}).json()
+    assert body["ordered_track_ids"] == mine
+    assert sorted(body["suggested_track_ids"]) == sorted(ids)
+    assert body["explanation"]["summary"].startswith("Your order")
+    transitions = body["explanation"]["transitions"]
+    assert [(t["from_id"], t["to_id"]) for t in transitions] == list(zip(mine, mine[1:]))
+
+
 def test_unknown_track_ids_404(client):
     assert client.post("/api/analyze", json={"track_ids": ["nope"]}).status_code == 404
     assert client.post("/api/order", json={"track_ids": ["nope"]}).status_code == 404

@@ -34,7 +34,7 @@ from backend.logic.calibration import (
     recommended_overlap_seconds,
     update_preference,
 )
-from backend.logic.explain import OrderExplanation, explain_order
+from backend.logic.explain import OrderExplanation, explain_order, explain_user_order
 from backend.logic.ordering import order_tracks
 from backend.logic.scoring import score_pairs
 from backend.logic.windows import DEFAULT_SET_SECONDS_PER_TRACK, choose_windows
@@ -88,8 +88,14 @@ class AnalyzeResponse(BaseModel):
     tracks: list[Track]
 
 
+class OrderRequest(TrackIdsRequest):
+    # True: keep track_ids as the user arranged them and explain that order.
+    keep_order: bool = False
+
+
 class OrderResponse(BaseModel):
     ordered_track_ids: list[str]
+    suggested_track_ids: list[str]  # Mixr's best order, even when the user kept their own
     scores: list[PairScore]
     explanation: OrderExplanation
 
@@ -244,14 +250,21 @@ def _distinct_tracks(track_ids: list[str], minimum: int) -> list[Track]:
 
 
 @router.post("/order", response_model=OrderResponse)
-def order(request: TrackIdsRequest):
+def order(request: OrderRequest):
     tracks = _distinct_tracks(request.track_ids, 1)
     scores = score_pairs(tracks)
-    ordered = order_tracks(tracks, scores)
+    suggested = order_tracks(tracks, scores)
+    if request.keep_order:
+        ordered = list(request.track_ids)
+        explanation = explain_user_order(tracks, scores, suggested, ordered)
+    else:
+        ordered = suggested
+        explanation = explain_order(tracks, scores, request.track_ids, ordered)
     return OrderResponse(
         ordered_track_ids=ordered,
+        suggested_track_ids=suggested,
         scores=scores,
-        explanation=explain_order(tracks, scores, request.track_ids, ordered),
+        explanation=explanation,
     )
 
 
