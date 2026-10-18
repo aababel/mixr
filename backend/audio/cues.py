@@ -19,11 +19,15 @@ phrase_starts_seconds
 
 sections
     Consecutive phrases merged while they sound alike; a boundary is kept
-    where the feature change is clearly above this track's typical change.
-    Contiguous and covering the whole track (first starts at 0, last ends at
-    the duration). Labels only where the energy shape makes them obvious:
-    a quiet first section is "intro", a quiet last one "outro", a quiet one
-    in between "break". Everything else stays None.
+    where the feature change is clearly above this track's typical change or
+    the loudness steps up or down, and no section is longer than
+    MAX_SECTION_PHRASES phrases (16 bars). Contiguous and covering the whole
+    track (first starts at 0, last ends at the duration). Labels only where
+    the shape makes them obvious: a quiet first section is "intro", a quiet
+    last one "outro", a quiet one in between "break"; a loud section the
+    music lifts into is a "drop" (little lead melody) or "chorus" (melodic),
+    and a loud melodic section that comes back later is a "chorus" too.
+    Everything else stays None.
 """
 import librosa
 import numpy as np
@@ -41,6 +45,12 @@ NOVELTY_BARS = 4  # compare this many bars before vs after a boundary
 SECTION_SPLIT = 1.25  # keep a phrase boundary if its change > this x the median change
 QUIET_SECTION = 0.6  # energy below this (relative to loudest section) can be intro/outro
 BREAK_SECTION = 0.5
+ENERGY_STEP = 0.2  # a phrase this much louder or quieter than the one before starts a section
+MAX_SECTION_PHRASES = 2  # longer sections are split at their biggest change (16 bars, ~30 s)
+LOUD_SECTION = 0.8  # chorus / drop candidates
+LIFT = 0.2  # energy rise from the section before that marks a chorus or drop entrance
+MELODIC_SECTION = 0.5  # mean melody_activity: chorus at or above, drop below
+REPEAT_SIMILARITY = 0.6  # "comes back": feature distance below this x the median between sections
 
 
 def _spectrum(y: np.ndarray, sr: int) -> np.ndarray:
@@ -111,9 +121,143 @@ def _bar_novelty(bar_feats: np.ndarray) -> np.ndarray:
     return nov
 
 
+def _span_mean(series: np.ndarray | None, hop: float, a: float, b: float) -> float:
+    if series is None or not series.size or hop <= 0:
+        return 0.0
+    i0 = int(a / hop)
+    seg = series[i0:max(i0 + 1, int(np.ceil(b / hop)))]
+    return float(seg.mean()) if seg.size else 0.0
+
+
+def _sections(
+    bar_feats: np.ndarray, phrase_bars: list[int], phrase_starts: list[float],
+    beats: list[float], duration: float, energy_rms: list[float], hop: float,
+    melody: list[float] | None,
+) -> list[Section]:
+    """Group phrases into sections and label the obvious ones.
+
+    Boundaries: a phrase start is a section start when the music changes
+    clearly there (feature change > SECTION_SPLIT x this track's median
+    change) or the loudness steps by >= ENERGY_STEP. Any section longer than
+    MAX_SECTION_PHRASES phrases is then split at its biggest internal change,
+    so no section can swallow half a song.
+    """
+    n_bars = len(bar_feats)
+    bounds = phrase_bars + [n_bars]
+    m = len(phrase_bars)
+    z = _z(bar_feats)
+    pf = np.array([z[a:b].mean(axis=0) for a, b in zip(bounds, bounds[1:])])
+    rms = np.asarray(energy_rms, dtype=np.float64)
+    mel = np.asarray(melody, dtype=np.float64) if melody else None
+    # phrase j covers [p_start[j], p_end[j]); the first one also takes the lead-in
+    p_start = [0.0] + phrase_starts[1:]
+    p_end = phrase_starts[1:] + [duration]
+    p_energy = np.array([_span_mean(rms, hop, a, b) for a, b in zip(p_start, p_end)])
+    top_e = p_energy.max() if p_energy.size and p_energy.max() > 0 else 1.0
+    p_energy = p_energy / top_e
+
+    # change at the start of phrase j (j >= 1)
+    change = np.zeros(m)
+    if m >= 2:
+        change[1:] = np.linalg.norm(np.diff(pf, axis=0), axis=1)
+        med = float(np.median(change[1:])) or 1e-9
+        keep = {j for j in range(1, m)
+                if change[j] > SECTION_SPLIT * med or abs(p_energy[j] - p_energy[j - 1]) >= ENERGY_STEP}
+    else:
+        keep = set()
+
+    def split_long(a: int, b: int) -> None:  # phrases [a, b)
+        if b - a <= MAX_SECTION_PHRASES:
+            return
+        j = max(range(a + 1, b), key=lambda j: change[j])
+        keep.add(j)
+        split_long(a, j)
+        split_long(j, b)
+
+    cuts = [0] + sorted(keep) + [m]
+    for a, b in zip(cuts, cuts[1:]):
+        split_long(a, b)
+    cuts = [0] + sorted(keep) + [m]
+
+    # a sliver after the last boundary (the song's final hit) joins the section before it
+    phrase_len = PHRASE_BARS * BEATS_PER_BAR * float(np.median(np.diff(beats)))
+    if len(cuts) > 2 and duration - p_start[cuts[-2]] < 0.5 * phrase_len:
+        cuts.pop(-2)
+
+    groups = list(zip(cuts, cuts[1:]))
+    starts = [round(p_start[a], 4) for a, _ in groups]
+    ends = starts[1:] + [round(duration, 4)]
+    raw = [_span_mean(rms, hop, a, b) for a, b in zip(starts, ends)]
+    top = max(raw) if raw and max(raw) > 0 else 1.0
+    energy = [e / top for e in raw]
+    melo = [_span_mean(mel, hop, a, b) if mel is not None else None for a, b in zip(starts, ends)]
+    feats = [pf[a:b].mean(axis=0) for a, b in groups]
+    labels = _labels(energy, melo, feats)
+    return [Section(start_seconds=a, end_seconds=b, energy=round(e, 3), label=lab)
+            for a, b, e, lab in zip(starts, ends, energy, labels)]
+
+
+def _labels(energy: list[float], melody: list[float | None], feats: list[np.ndarray]) -> list[str | None]:
+    """Labels only where the shape makes them obvious; everything else None.
+
+    intro / outro: a quiet first / last section. break: a quiet one between
+          (energy alone can't tell a softer verse from a break, so only clearly
+          quiet ones).
+    drop: a loud section that the music lifts into (>= LIFT above the section
+          before it) with little lead melody: the beat is the hook.
+    chorus: a loud section with lead melody that either follows such a lift
+          or comes back after something quieter (sounds like another loud
+          section, with a section at least LIFT quieter between them).
+    A loud section right after a chorus / drop that sounds the same keeps its
+    label (one long chorus split by the length cap).
+    """
+    n = len(energy)
+    labels: list[str | None] = [None] * n
+    if n < 3:
+        return labels
+    for i, e in enumerate(energy):
+        if i == 0 and e < QUIET_SECTION:
+            labels[i] = "intro"
+        elif i == n - 1 and e < QUIET_SECTION:
+            labels[i] = "outro"
+        elif 0 < i < n - 1 and e < BREAK_SECTION:
+            labels[i] = "break"
+
+    loud = [i for i, e in enumerate(energy) if e >= LOUD_SECTION and labels[i] is None]
+    if not loud:
+        return labels
+    dists = [float(np.linalg.norm(feats[i] - feats[j])) for i in range(n) for j in range(i + 1, n)]
+    alike = REPEAT_SIMILARITY * float(np.median(dists)) if dists else 0.0
+    def returns(i: int) -> bool:
+        """Another loud section sounds like this one, with something at
+        least LIFT quieter in between (a chorus comes back after a verse)."""
+        for j in loud:
+            if abs(i - j) <= 1 or float(np.linalg.norm(feats[i] - feats[j])) > alike:
+                continue
+            a, b = sorted((i, j))
+            if min(energy[a + 1:b]) <= energy[i] - LIFT:
+                return True
+        return False
+
+    for i in loud:
+        lifted = i > 0 and energy[i] - energy[i - 1] >= LIFT
+        mel = melody[i]
+        if lifted and mel is not None and mel < MELODIC_SECTION:
+            labels[i] = "drop"
+        elif (lifted or returns(i)) and (mel is None or mel >= MELODIC_SECTION):
+            labels[i] = "chorus"
+    # a long chorus or drop split by the 16-bar cap: the loud part right after
+    # it that sounds the same keeps the label
+    for i in range(1, n):
+        if (labels[i] is None and labels[i - 1] in ("chorus", "drop") and energy[i] >= LOUD_SECTION
+                and float(np.linalg.norm(feats[i] - feats[i - 1])) <= alike):
+            labels[i] = labels[i - 1]
+    return labels
+
+
 def phrases_and_sections(
     power: np.ndarray, sr: int, beats: list[float], duration: float,
-    energy_rms: list[float], hop_seconds: float,
+    energy_rms: list[float], hop_seconds: float, melody: list[float] | None = None,
 ) -> tuple[list[float], list[Section], list[str]]:
     notes: list[str] = []
     beats = [b for b in beats if 0 <= b < duration]
@@ -134,44 +278,11 @@ def phrases_and_sections(
     phrase_bars = list(range(k, len(bar_idx), PHRASE_BARS))
     phrase_starts = [round(beats[bar_idx[b]], 4) for b in phrase_bars]
 
-    # sections: merge consecutive phrases that sound alike
-    z = _z(bar_feats)
-    bounds = phrase_bars + [len(bar_idx)]
-    pf = np.array([z[a:b].mean(axis=0) for a, b in zip(bounds, bounds[1:])])
-    if len(pf) >= 2:
-        change = np.linalg.norm(np.diff(pf, axis=0), axis=1)
-        keep = change > SECTION_SPLIT * float(np.median(change))
-    else:
-        keep = np.zeros(0, dtype=bool)
-    starts = [0.0] + [phrase_starts[j + 1] for j in range(len(keep)) if keep[j]]
-    # a sliver after the last kept boundary (the song's final hit) joins the section before it
-    phrase_len = PHRASE_BARS * BEATS_PER_BAR * float(np.median(np.diff(beats)))
-    if len(starts) > 1 and duration - starts[-1] < 0.5 * phrase_len:
-        starts.pop()
-    ends = starts[1:] + [round(duration, 4)]
-
-    rms = np.asarray(energy_rms, dtype=np.float64)
-
-    def mean_energy(a: float, b: float) -> float:
-        i0, i1 = int(a / hop_seconds), max(int(a / hop_seconds) + 1, int(np.ceil(b / hop_seconds)))
-        seg = rms[i0:i1]
-        return float(seg.mean()) if seg.size else 0.0
-
-    raw = [mean_energy(a, b) for a, b in zip(starts, ends)]
-    top = max(raw) if raw and max(raw) > 0 else 1.0
-    sections: list[Section] = []
-    for i, (a, b, e) in enumerate(zip(starts, ends, raw)):
-        energy = round(e / top, 3)
-        label = None
-        if len(starts) >= 3:
-            if i == 0 and energy < QUIET_SECTION:
-                label = "intro"
-            elif i == len(starts) - 1 and energy < QUIET_SECTION:
-                label = "outro"
-            elif 0 < i < len(starts) - 1 and energy < BREAK_SECTION:
-                label = "break"
-        sections.append(Section(start_seconds=round(a, 4), end_seconds=round(b, 4),
-                                energy=energy, label=label))
+    sections = _sections(bar_feats, phrase_bars, phrase_starts, beats, duration,
+                         energy_rms, hop_seconds, melody)
+    if sections and max(s.end_seconds - s.start_seconds for s in sections) > 0:
+        n_lab = sum(1 for s in sections if s.label)
+        notes.append(f"{len(sections)} sections, {n_lab} labeled")
     return phrase_starts, sections, notes
 
 
@@ -182,7 +293,8 @@ def analyze_cues(
     """melody_activity, phrase_starts_seconds, sections and notes for one track."""
     power = _spectrum(y, sr)
     melody = melody_activity(power, sr, hop_seconds, len(energy_rms))
-    phrases, sections, notes = phrases_and_sections(power, sr, beats, duration, energy_rms, hop_seconds)
+    phrases, sections, notes = phrases_and_sections(power, sr, beats, duration, energy_rms,
+                                                    hop_seconds, melody)
     return {
         "melody_activity": melody,
         "phrase_starts_seconds": phrases,
