@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 
 import {
   ApiError,
+  FULL_SONGS,
   NEUTRAL_PREFERENCE,
   analyzeTracks,
   createMix,
@@ -11,6 +12,7 @@ import {
   previewCalibration,
   uploadTracks,
   type CalibrationTrial,
+  type MixOptions,
   type MixResult as Mix,
   type OrderExplanation as Explanation,
   type Preference,
@@ -20,6 +22,7 @@ import {
 import Calibration from "./Calibration";
 import Dropzone from "./Dropzone";
 import MixResult from "./MixResult";
+import ModePicker from "./ModePicker";
 import OrderExplanation from "./OrderExplanation";
 import Stepper from "./Stepper";
 import TrackCard from "./TrackCard";
@@ -76,6 +79,13 @@ function validateFiles(files: File[]): string | null {
   return null;
 }
 
+const TYPICAL_BLEND_SECONDS = 8;
+
+/** Rough length of a full-songs mix, before the real blends are rendered. */
+const fullMixSeconds = (tracks: Track[]) =>
+  tracks.reduce((sum, t) => sum + t.duration_seconds, 0) -
+  Math.max(0, tracks.length - 1) * TYPICAL_BLEND_SECONDS;
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export default function Mixr() {
@@ -86,6 +96,7 @@ export default function Mixr() {
   const [mixResult, setMixResult] = useState<Mix | null>(null);
   const [preference, setPreference] = useState<Preference>(NEUTRAL_PREFERENCE);
   const [firstTrial, setFirstTrial] = useState<CalibrationTrial | null>(null);
+  const [mixOptions, setMixOptions] = useState<MixOptions>(FULL_SONGS);
   const [stage, setStage] = useState<Stage>("select");
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -140,12 +151,12 @@ export default function Mixr() {
   const tune = () =>
     run("preview", async () => {
       try {
-        setFirstTrial(await previewCalibration(trackIds, 0));
+        setFirstTrial(await previewCalibration(trackIds, 0, [], mixOptions));
         setStage("tuning");
       } catch (e) {
         if (!(e instanceof ApiError && e.status === 422)) throw e;
         setJob("mix");
-        setMixResult(await createMix(trackIds, preference));
+        setMixResult(await createMix(trackIds, preference, mixOptions));
         setStage("mixed");
         setNotice({
           label: "Skipped tuning",
@@ -156,7 +167,7 @@ export default function Mixr() {
 
   const mix = () =>
     run("mix", async () => {
-      setMixResult(await createMix(trackIds, preference));
+      setMixResult(await createMix(trackIds, preference, mixOptions));
       setStage("mixed");
     });
 
@@ -166,6 +177,7 @@ export default function Mixr() {
     setExplanation(null);
     setMixResult(null);
     setPreference(NEUTRAL_PREFERENCE);
+    setMixOptions(FULL_SONGS);
     setFirstTrial(null);
     setStage("select");
     setError(null);
@@ -198,6 +210,7 @@ export default function Mixr() {
           tracks={tracks}
           initialTrial={firstTrial}
           preference={preference}
+          options={mixOptions}
           onPreference={setPreference}
           onMix={mix}
         />
@@ -237,6 +250,15 @@ export default function Mixr() {
                 <TrackCard key={track.id} track={track} position={i + 1} />
               ))}
             </ul>
+          )}
+
+          {stage === "ordered" && (
+            <ModePicker
+              songs={tracks.length}
+              fullSeconds={fullMixSeconds(tracks)}
+              options={mixOptions}
+              onChange={setMixOptions}
+            />
           )}
 
           <div className="flex flex-col gap-3 sm:flex-row">

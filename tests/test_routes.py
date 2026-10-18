@@ -181,6 +181,15 @@ def test_calibration_never_repeats_a_compared_pair(client):
     assert "No more song pairs" in res.json()["detail"]
 
 
+def test_set_mode_is_not_available_yet(client):
+    ids = upload(client)["track_ids"]
+    body = {"ordered_track_ids": ids, "mode": "set", "target_seconds": 300}
+    assert client.post("/api/mix", json=body).status_code == 501
+    assert client.post("/api/calibration/preview", json=body).status_code == 501
+    bad_length = {**body, "target_seconds": 30}
+    assert client.post("/api/mix", json=bad_length).status_code == 422
+
+
 def test_calibration_rejects_songs_too_short_to_compare(client):
     ids = upload(client)["track_ids"]
     res = client.post("/api/calibration/preview", json={"ordered_track_ids": ids})

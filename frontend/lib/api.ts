@@ -160,11 +160,26 @@ export function orderTracks(trackIds: string[]) {
   }>("/api/order", { track_ids: trackIds });
 }
 
-export function createMix(orderedTrackIds: string[], preference: Preference = NEUTRAL_PREFERENCE) {
+/** "full" plays every song; "set" trims each song to its best part to hit a target length. */
+export type MixOptions = { mode: "full" | "set"; targetSeconds: number | null };
+
+export const FULL_SONGS: MixOptions = { mode: "full", targetSeconds: null };
+
+const modeFields = (options: MixOptions) => ({
+  mode: options.mode,
+  target_seconds: options.mode === "set" ? options.targetSeconds : null,
+});
+
+export function createMix(
+  orderedTrackIds: string[],
+  preference: Preference = NEUTRAL_PREFERENCE,
+  options: MixOptions = FULL_SONGS,
+) {
   return postJson<MixResult>("/api/mix", {
     ordered_track_ids: orderedTrackIds,
     overlap_preference: preference.overlap_preference,
     calibrated: preference.votes.length > 0,
+    ...modeFields(options),
   });
 }
 
@@ -172,11 +187,13 @@ export function previewCalibration(
   orderedTrackIds: string[],
   trial: number,
   excludePairs: [string, string][] = [],
+  options: MixOptions = FULL_SONGS,
 ) {
   return postJson<CalibrationTrial>("/api/calibration/preview", {
     ordered_track_ids: orderedTrackIds,
     trial,
     exclude_pairs: excludePairs,
+    ...modeFields(options),
   });
 }
 
