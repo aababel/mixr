@@ -6,27 +6,46 @@ exact excerpt of what the final mix will contain at that seam.
 Seam model (all times in seconds in the public contract):
   * The overlap always ends exactly at the outgoing track's last sample.
   * The incoming track always starts at its sample 0.
-  * So the overlap region is outgoing[o_start:] blended with incoming[:ov].
-  * mix.py stitches: outgoing[:o_start] + seam + incoming[ov:]
+  * The seam blends outgoing[o_start:] with incoming[:consumed]; with a
+    tempo glide both are time-warped to the seam length, which can differ
+    from either.
+  * mix.py stitches: outgoing[:o_start] + seam + incoming[consumed:]
     which keeps every sample of both tracks (no truncation, no skipping).
 
 Processing actually performed (and recorded in AppliedTransition):
   1. Clamp the requested overlap to a safe range (SafetyLimits).
-  2. Optionally beat-snap: shift the overlap so the incoming track's first
-     beat lands on an outgoing beat, staying inside the safe range.
-  3. Per-track gain (outgoing_gain_db / incoming_gain_db, default 0 dB),
-     applied to the seam and to preview context. The caller supplies one
-     gain per TRACK (see loudness.py), and mix.py applies the same gain to
-     the rest of that track, so level never jumps at a seam boundary.
-  4. Fade out / fade in (equal-power or linear).
-  5. Soft limiter on the seam only if its peak exceeds the threshold.
-No EQ and no tempo change are applied.
+  2. Plan the seam from both beat lists (seam_plan.py):
+       - tempos within 12% (after half/double folding): match beats
+         beat-for-beat over a whole number of bars near the requested
+         length; if the grids would drift, glide the tempo (step 3)
+       - tempos further apart: short ~2-beat blend ending on an incoming
+         beat, no warp
+       - no steady beat grid: snap the first incoming beat onto an
+         outgoing beat (no warp)
+  3. Tempo glide: Rubber Band time map warps the outgoing side from its
+     tempo to the incoming tempo, and the incoming side from the outgoing
+     tempo to its own, so every matched beat lands together.
+     tempo_change = incoming/outgoing tempo ratio when a warp is applied.
+  4. Per-track gain (outgoing_gain_db / incoming_gain_db, from loudness.py),
+     the same gain mix.py applies to the rest of each track.
+  5. Split-frequency swap (bands.py): lows swap at the midpoint, highs at
+     ~30%, mids crossfade with fade_style. Recorded in applied_eq.
+  6. Soft limiter on the seam only if its peak exceeds the threshold.
 """
 from dataclasses import dataclass
 
 import numpy as np
 
 from backend.api.schemas import AppliedTransition, RenderMode, TransitionRequest
+from backend.audio.bands import band_swap
+from backend.audio.seam_plan import (
+    GRID_WINDOW_MARGIN_SECONDS, MAX_GLIDE_DEVIATION, SeamPlan, beat_period, deviation,
+    fit_grid, fold_ratio, kick_grid, plan_matched, plan_short,
+)
+from backend.audio.stretch import engine_name, rubberband_available, timemap_stretch
+
+WARP_CONTEXT_SECONDS = 0.25  # extra audio fed to Rubber Band beyond each warped edge
+EDGE_BLEND_SECONDS = 0.010  # crossfade between untouched track and warped seam edge
 
 
 @dataclass(frozen=True)
@@ -140,6 +159,109 @@ def gain_factor(gain_db: float) -> np.float32:
     return np.float32(10.0 ** (float(gain_db) / 20.0))
 
 
+def _grid(audio: np.ndarray, sr: int, beats: list[float], t_lo: float, t_hi: float):
+    """Beat grid near a seam: locked to the kicks in the audio when there is a
+    clear kick pulse (tracker beats only seed the tempo), else fitted to the
+    tracker's beats. Returns (Grid or None, description of the source)."""
+    seed = beat_period(beats, t_lo, t_hi)
+    if seed is not None:
+        mono = audio[int(t_lo * sr):int(t_hi * sr)].mean(axis=1)
+        g = kick_grid(mono, sr, t_lo, seed)
+        if g is not None:
+            return g, "kick onsets"
+    return fit_grid(beats, t_lo, t_hi), "tracked beats"
+
+
+def _plan_seam(
+    out: np.ndarray, inc: np.ndarray, sr: int,
+    out_beats: list[float], in_beats: list[float],
+    request: TransitionRequest, clamped: float, lo: float, hi: float, notes: list[str],
+) -> SeamPlan:
+    """Choose glide / beat_matched / short / snapped / plain (see seam_plan.py)."""
+    out_len, in_len = out.shape[0], inc.shape[0]
+    out_dur, in_dur = out_len / sr, in_len / sr
+
+    def identity(kind: str, seconds: float, beats: list[int] | None = None) -> SeamPlan:
+        ov = max(1, min(int(round(seconds * sr)), out_len, in_len))
+        return SeamPlan(kind=kind, o_start=out_len - ov, in_consumed=ov, seam_len=ov,
+                        beats=[b for b in (beats or []) if 0 <= b <= ov], target_seconds=seconds)
+
+    if not request.beat_align:
+        return identity("plain", clamped)
+
+    span = hi + GRID_WINDOW_MARGIN_SECONDS
+    g_out, src_out = _grid(out, sr, out_beats, max(0.0, out_dur - span), out_dur)
+    g_in, src_in = _grid(inc, sr, in_beats, 0.0, min(in_dur, span))
+    if g_out and g_in:
+        notes.append(f"beat grids: outgoing {g_out.bpm:.2f} BPM from {src_out}, "
+                     f"incoming {g_in.bpm:.2f} BPM from {src_in}")
+    if g_out and g_in:
+        ratio, _ = fold_ratio(g_out.period, g_in.period)
+        if deviation(ratio) <= MAX_GLIDE_DEVIATION:
+            plan = plan_matched(out_len, in_len, sr, g_out, g_in, clamped, lo, hi, rubberband_available())
+            if isinstance(plan, SeamPlan):
+                return plan
+            if plan == "needs_warp":
+                short = plan_short(out_len, in_len, sr, g_in, lo, hi)
+                if short:
+                    short.notes.insert(0, f"tempo glide skipped: Rubber Band is not installed "
+                                          f"({g_out.bpm:.1f} -> {g_in.bpm:.1f} BPM would drift); "
+                                          f"requested overlap not used")
+                    return short
+            else:
+                notes.append("beat-matched blend does not fit the safe overlap range")
+        else:
+            short = plan_short(out_len, in_len, sr, g_in, lo, hi)
+            if short:
+                short.notes.insert(0, f"tempos {g_out.bpm:.1f} and {g_in.bpm:.1f} BPM differ by "
+                                      f"{deviation(ratio):.0%} after half/double folding (glide limit "
+                                      f"{MAX_GLIDE_DEVIATION:.0%}): no warp, requested overlap not used")
+                return short
+    elif out_beats and in_beats:
+        notes.append("beat grid too irregular to match beat-for-beat; only the first beat is aligned")
+
+    # Fallback: previous behaviour, first incoming beat snapped onto an outgoing beat.
+    snapped = _beat_snap(clamped, out_dur, list(out_beats), list(in_beats), lo, hi)
+    if snapped is None:
+        notes.append("beat alignment skipped: no beats or no aligned overlap in safe range")
+        return identity("plain", clamped)
+    return identity("snapped", snapped, [int(round(b * sr)) for b in in_beats])
+
+
+def _edge_blend(warped: np.ndarray, original: np.ndarray, at_start: bool, sr: int) -> None:
+    """Crossfade a few ms between the untouched track and its warped seam
+    segment, where the warp rate is 1, so the seam joins the body seamlessly."""
+    n = min(int(round(EDGE_BLEND_SECONDS * sr)), warped.shape[0] // 4, original.shape[0])
+    if n < 2:
+        return
+    w = ((np.arange(n) + 0.5) / n).astype(np.float32)[:, None]
+    if at_start:
+        warped[:n] = original[:n] * (1 - w) + warped[:n] * w
+    else:
+        warped[-n:] = warped[-n:] * (1 - w) + original[-n:] * w
+
+
+def _warp_outgoing(out: np.ndarray, plan: SeamPlan, sr: int) -> np.ndarray:
+    ctx = min(int(round(WARP_CONTEXT_SECONDS * sr)), plan.o_start)  # warm-up audio for Rubber Band
+    seg = out[plan.o_start - ctx:]
+    tmap = [(0, 0)] + [(s + ctx, t + ctx) for s, t in plan.out_map if (s, t) != (0, 0) or ctx]
+    tmap = [p for i, p in enumerate(tmap) if i == 0 or p != tmap[i - 1]]
+    warped = timemap_stretch(seg, sr, tmap, plan.seam_len + ctx)[ctx:].copy()
+    _edge_blend(warped, out[plan.o_start:], True, sr)
+    return warped
+
+
+def _warp_incoming(inc: np.ndarray, plan: SeamPlan, sr: int) -> np.ndarray:
+    ctx = min(int(round(WARP_CONTEXT_SECONDS * sr)), inc.shape[0] - plan.in_consumed)
+    seg = inc[:plan.in_consumed + ctx]
+    tmap = list(plan.in_map)
+    if ctx:
+        tmap.append((plan.in_consumed + ctx, plan.seam_len + ctx))
+    warped = timemap_stretch(seg, sr, tmap, plan.seam_len + ctx)[:plan.seam_len].copy()
+    _edge_blend(warped, inc[:plan.in_consumed], False, sr)
+    return warped
+
+
 def render_transition(
     outgoing: np.ndarray,
     incoming: np.ndarray,
@@ -158,8 +280,8 @@ def render_transition(
 
     preview: pre-roll from outgoing + the seam + post-roll from incoming.
              The seam samples are bit-identical to final mode.
-    final:   only the overlapped seam (length = actual overlap). mix.py
-             stitches full tracks around it using seam_sample_bounds().
+    final:   only the overlapped seam. mix.py stitches full tracks around it
+             using seam_sample_bounds().
 
     Audio may be (samples,), (samples, ch) or channels-first (ch, samples).
     Output is float32 shaped (samples, ch).
@@ -167,6 +289,11 @@ def render_transition(
     outgoing_gain_db / incoming_gain_db: whole-track gain for each side,
     recorded as applied_gain_db. Pass the same value for a track at both of
     its seams and in its preview.
+
+    In the result, actual_overlap_seconds is how much of the INCOMING track
+    plays inside the seam (what mix.py skips afterwards). With a tempo glide
+    the seam itself is a different length: in final mode that is
+    output_duration_seconds.
     """
     if sr <= 0:
         raise ValueError("sr must be positive")
@@ -192,30 +319,26 @@ def render_transition(
             f"(safe range {lo:.3f}-{hi:.3f}s)"
         )
 
-    # 2. beat snap
-    chosen = clamped
-    if request.beat_align:
-        snapped = _beat_snap(
-            clamped, out_dur, list(outgoing_beats_seconds),
-            list(incoming_beats_seconds), lo, hi,
-        )
-        if snapped is None:
-            notes.append("beat alignment skipped: no beats or no aligned overlap in safe range")
-        else:
-            chosen = snapped
+    # 2. plan: beat matching, tempo glide or short blend
+    plan = _plan_seam(out, inc, sr, list(outgoing_beats_seconds),
+                      list(incoming_beats_seconds), request, clamped, lo, hi, notes)
+    notes.extend(plan.notes)
+    o_start, in_cons, seam_len = plan.o_start, plan.in_consumed, plan.seam_len
 
-    ov = int(round(chosen * sr))
-    ov = max(1, min(ov, out.shape[0], inc.shape[0]))
-    o_start = out.shape[0] - ov
-    actual = ov / sr
-    beat_adjust = actual - clamped if request.beat_align else 0.0
+    # 3. time-warp each side onto the shared output beat grid
+    out_seg = _warp_outgoing(out, plan, sr) if plan.out_map else out[o_start:]
+    in_seg = _warp_incoming(inc, plan, sr) if plan.in_map else inc[:in_cons]
+    if plan.warped:
+        notes.append(f"time-warped with {engine_name()} time map")
 
-    # 3. per-track gain, 4. fades
+    # 4. per-track gain, 5. split-frequency swap with the mids crossfaded
     g_out, g_in = gain_factor(outgoing_gain_db), gain_factor(incoming_gain_db)
-    fade_out, fade_in = _fades(ov, request.fade_style)
-    seam = out[o_start:] * (fade_out * g_out) + inc[:ov] * (fade_in * g_in)
+    fade_out, fade_in = _fades(seam_len, request.fade_style)
+    blend, eq_desc = band_swap(out_seg * g_out, in_seg * g_in, sr, plan.beats, fade_out, fade_in)
+    eq_desc = eq_desc.replace("mids crossfaded", f"mids {request.fade_style} crossfade")
+    seam = blend.astype(np.float32)
 
-    # 5. soft limiter, only when needed
+    # 6. soft limiter, only when needed
     peak = float(np.max(np.abs(seam)))
     if peak > safety.limiter_threshold:
         seam = _soft_limit(seam, safety.limiter_threshold)
@@ -231,9 +354,10 @@ def render_transition(
     else:
         ctx = int(round(max(0.0, preview_context_seconds) * sr))
         pre = out[max(0, o_start - ctx):o_start] * g_out
-        post = inc[ov:ov + ctx] * g_in
+        post = inc[in_cons:in_cons + ctx] * g_in
         audio = np.concatenate([pre, seam, post], axis=0).astype(np.float32)
 
+    actual = in_cons / sr
     applied = AppliedTransition(
         from_id=request.from_id,
         to_id=request.to_id,
@@ -244,10 +368,10 @@ def render_transition(
         overlap_changed_for_safety=changed_for_safety,
         outgoing_start_seconds=o_start / sr,
         incoming_start_seconds=0.0,
-        beat_alignment_adjustments_seconds=beat_adjust,
+        beat_alignment_adjustments_seconds=(actual - clamped) if plan.kind != "plain" else 0.0,
         applied_gain_db={"outgoing": float(outgoing_gain_db), "incoming": float(incoming_gain_db)},
-        applied_eq=None,
-        tempo_change=None,
+        applied_eq=eq_desc,
+        tempo_change=plan.tempo_ratio if plan.warped else None,
         safety_adjustments=notes,
         output_duration_seconds=audio.shape[0] / sr,
     )
@@ -255,9 +379,12 @@ def render_transition(
 
 
 def seam_sample_bounds(applied: AppliedTransition, sr: int) -> tuple[int, int]:
-    """(outgoing_start_sample, overlap_samples) for stitching in mix.py.
+    """(outgoing_start_sample, incoming_samples_consumed) for stitching in mix.py.
 
-    Stitch as: outgoing[:o_start] + seam + incoming[overlap:].
+    Stitch as: outgoing[:o_start] + seam + incoming[consumed:]. The second
+    value is how much of the incoming track the seam used, NOT the seam
+    length; they differ when the seam is tempo-glided. actual_overlap_seconds
+    holds whole samples (consumed / sr), so rounding recovers them exactly.
     """
     o_start = int(round(applied.outgoing_start_seconds * sr))
     ov = int(round(applied.actual_overlap_seconds * sr))

@@ -107,10 +107,12 @@ def test_render_transition_records_and_applies_gain():
                                    outgoing_gain_db=-6.0, incoming_gain_db=3.0)
     assert ap0.applied_gain_db == {"outgoing": 0.0, "incoming": 0.0}
     assert ap.applied_gain_db == {"outgoing": -6.0, "incoming": 3.0}
-    n = gained.shape[0]
-    fo, fi = np.cos((np.arange(n) + 0.5) / n * np.pi / 2), np.sin((np.arange(n) + 0.5) / n * np.pi / 2)
-    expected = a[-n:] * (fo * 10 ** (-6 / 20))[:, None] + b[:n] * (fi * 10 ** (3 / 20))[:, None]
+    # The seam is linear in each input, so gains scale each side's contribution.
+    only_out, _ = render_transition(a, np.zeros_like(b), SR, [], [], req, "final")
+    only_in, _ = render_transition(np.zeros_like(a), b, SR, [], [], req, "final")
+    expected = only_out * 10 ** (-6 / 20) + only_in * 10 ** (3 / 20)
     np.testing.assert_allclose(gained, expected, atol=1e-5)
+    np.testing.assert_allclose(plain, only_out + only_in, atol=1e-5)
 
 
 @pytest.fixture

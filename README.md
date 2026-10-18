@@ -2,13 +2,16 @@
 
 Your playlist. DJ'd by AI. Built at DubHacks 2026 by Shaan, Aarav, and Sahil.
 
-Pipeline: Upload (2–5 MP3/WAV) → Analyze → Score → Order → optional A/B calibration → Mix → Play/Download.
+Pipeline: Upload (3–5 MP3/WAV) → Analyze → Score → Order → optional A/B calibration → Mix → Play/Download.
 
 > Status: upload works end to end. Analyze and order return placeholder data; calibration and mix return 501 until the renderer lands.
 
 ## Setup
 
-Requirements: Python 3.11 or 3.12 (not 3.13), Node 20+, FFmpeg.
+Requirements: Python 3.11 or 3.12 (not 3.13), Node 20+, FFmpeg, Rubber Band
+(`brew install rubberband` on macOS, `apt-get install rubberband-cli` on
+Debian/Ubuntu). Without Rubber Band the app still works, but seams between
+tracks with different tempos fall back to a short 2-beat blend.
 
 ```bash
 python3.11 -m venv .venv
