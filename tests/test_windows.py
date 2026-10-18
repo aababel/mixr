@@ -13,13 +13,13 @@ from backend.logic.windows import (
     SET_TOLERANCE,
     TIME_GRID_SECONDS,
     WEIGHTS,
-    BLEND_FALLBACK_SECONDS,
     BLEND_SIZES,
+    CLASH_BLEND_SECONDS,
     MAX_BLEND_SECONDS,
-    UNMATCHED_BLEND_SECONDS,
     _cues,
+    _length_text,
+    _seam_choice,
     best_section,
-    blend_lengths,
     choose_windows,
     find_drops,
     plan_windows,
@@ -442,34 +442,82 @@ def _clashing_pair():
             make_track("xb", melody=[(0, 6, 0.1), (6, 192, 0.9)]))
 
 
-def test_blend_lengths_are_whole_phrases_of_the_outgoing_beat():
-    a, b = make_track("a"), make_track("b")
-    assert blend_lengths(a, b) == [8.0, 16.0, 32.0]  # 16, 32, 64 beats at 120 BPM
-    a.bpm = b.bpm = 90.0
-    assert blend_lengths(a, b) == pytest.approx([32 / 3, 64 / 3])  # 64 beats would pass 32 s
-    a.bpm, b.bpm = 120.0, 90.0
-    assert blend_lengths(a, b) == [UNMATCHED_BLEND_SECONDS]  # too far apart to beat-match
-    a.bpm = b.bpm = None
-    assert blend_lengths(a, b) == list(BLEND_FALLBACK_SECONDS)
-
-
 def test_each_seam_gets_a_blend_length_for_its_own_songs():
     ca, cb = _clean_pair()
     xa, xb = _clashing_pair()
     windows, overlaps = plan_windows([ca, cb, xa, xb])
-    assert overlaps[0] == 32.0  # clean handoff: the longest phrase
-    assert overlaps[1] == overlaps[2] == 8.0  # cb and xa, xa and xb sing over each other
-    assert "Long blend into cb (64 beats, 32 s)" in windows[0].reason
-    assert "Short blend into xb (16 beats, 8 s)" in windows[2].reason
+    # Clean handoff: B comes in at 0:16 and the blend lands as its vocals start at 0:40.
+    assert overlaps[0] == 24.0
+    assert windows[1].start_seconds == 16.0
+    assert "Blends into cb over 24 s (48 beats) and lands as its vocals come in at 0:40." in windows[0].reason
+    # cb and xa, xa and xb sing over each other: short, xb landing on its vocal entry.
+    assert overlaps[1] <= CLASH_BLEND_SECONDS and overlaps[2] <= CLASH_BLEND_SECONDS
+    assert "both songs carry melody at the seam, so it stays short" in windows[1].reason
+    assert "lands as its vocals come in at 0:06" in windows[2].reason
     check_windows([ca, cb, xa, xb], windows)
 
 
-def test_preference_leans_blend_lengths_without_overriding_the_songs():
+def test_blend_lands_on_the_incoming_chorus():
+    sec = lambda t0, t1, label: Section(start_seconds=t0, end_seconds=t1, label=label, energy=0.5)
+    a = make_track("a", melody=[(0, 150, 0.8), (150, 192, 0.05)])
+    b = make_track("b", melody=[(0, 192, 0.05)],
+                   sections=[sec(0, 32, "intro"), sec(32, 96, "chorus"), sec(96, 192, "verse")])
+    windows, overlaps = plan_windows([a, b])
+    assert windows[1].start_seconds + overlaps[0] == 32.0
+    assert "lands on its chorus at 0:32" in windows[0].reason
+
+
+def test_outgoing_vocal_line_limits_how_early_the_blend_starts():
+    # Leaving at A's own end with B in at 0:16: B's vocals at 0:40 are a
+    # 24 s landing, unless A starts a new vocal line 16 s before its end.
+    b = make_track("b", melody=[(0, 40, 0.05), (40, 192, 0.8)])
+    cb = _cues(b)
+    j = list(cb.grid).index(16.0)
+    picks = []
+    for melody in ([(0, 192, 0.05)], [(0, 176, 0.05), (176, 192, 0.6)]):
+        ca = _cues(make_track("a", melody=melody))
+        choice = _seam_choice(ca, cb, BLEND_SIZES["auto"], 0.0, {})
+        i = len(ca.grid) - 1
+        picks.append((choice.at(i, j), _length_text(ca, cb, choice.at(i, j), choice, i, j, False, 32.0)))
+    (free, free_text), (held, held_text) = picks
+    assert free.request(j) == 24.0 and free.land_what[j] == "vocal"
+    assert held.request(j) <= 16.5
+    assert "a later landing would start the blend before its last vocal line at 2:56" in held_text
+
+
+def test_preference_and_setting_lean_blend_lengths_without_overriding_the_songs():
     ca, cb = _clean_pair()
     xa, xb = _clashing_pair()
-    clean = [plan_windows([ca, cb], p)[1][0] for p in (-1.0, 0.0, 1.0)]
-    assert clean == sorted(clean) and clean[0] < clean[-1]
-    assert plan_windows([xa, xb], 1.0)[1] == [8.0]  # even a long preference keeps a vocal clash short
+    for setting in BLEND_SIZES:
+        clean = [plan_windows([ca, cb], p, transition_length=setting)[1][0] for p in (-1.0, 0.0, 1.0)]
+        assert clean == sorted(clean)
+        for p in (0.0, 1.0):  # even a long preference keeps a vocal clash short
+            assert plan_windows([xa, xb], p, transition_length=setting)[1][0] <= CLASH_BLEND_SECONDS
+    extended = [plan_windows([ca, cb], p, transition_length="extended")[1][0] for p in (-1.0, 1.0)]
+    assert extended[0] < extended[1]
+    by_setting = [plan_windows([ca, cb], transition_length=s)[1][0] for s in ("auto", "longer")]
+    assert by_setting == [24.0, 40.0]  # Longer lands on the same vocal entry from B's start
+
+
+def test_unmatched_tempos_echo_out_when_both_sides_have_a_beat():
+    a, b = make_track("a"), _at_bpm(make_track("b"), 90.0)
+    for setting, bars in (("auto", 2), ("extended", 4)):
+        windows, overlaps = plan_windows([a, b], transition_length=setting)
+        assert overlaps == [bars * 4 * 0.5]  # A's bars at 120 BPM
+        assert f"echoes out over its last {bars} bars" in windows[0].reason
+        assert "comes in on its downbeat under the echo" in windows[0].reason
+
+
+def test_unmatched_tempos_blend_over_a_beatless_intro():
+    a, b = make_track("a"), _at_bpm(make_track("b"), 90.0)
+    b.metadata = {"pulse": [0.5] * 40 + [3.0] * 152, "pulse_hop_seconds": 1.0}  # no kick for 40 s
+    windows, overlaps = plan_windows([a, b])
+    assert overlaps == [MAX_BLEND_SECONDS] and windows[1].start_seconds == 0.0
+    assert "b opens without a beat" in windows[0].reason
+    assert "lands ahead of its beat, which comes in at 0:40" in windows[0].reason
+    windows, overlaps = plan_windows([a, b], transition_length="extended")
+    assert overlaps == [40.0]
+    assert "lands as its beat comes in at 0:40" in windows[0].reason
 
 
 def test_blend_fits_inside_short_windows():
@@ -478,14 +526,6 @@ def test_blend_fits_inside_short_windows():
     shortest = min(lengths(windows))
     assert overlaps[0] <= shortest / 2
     assert "fits these windows" in windows[0].reason
-
-
-def test_unmatched_tempos_get_one_short_blend():
-    a, b = make_track("a"), make_track("b")
-    b.bpm = 90.0
-    windows, overlaps = plan_windows([a, b])
-    assert overlaps == [UNMATCHED_BLEND_SECONDS]
-    assert "tempos are too far apart" in windows[0].reason
 
 
 def test_set_mode_counts_the_chosen_blends_toward_the_target():
@@ -502,30 +542,6 @@ def _at_bpm(track, bpm):
     return track
 
 
-def test_transition_length_sets_the_blend_ladder():
-    a, b = make_track("a"), make_track("b")
-    # 120 BPM: 128 beats is 64 s, past even Extended's cap.
-    assert blend_lengths(a, b, "auto") == [8.0, 16.0, 32.0]
-    assert blend_lengths(a, b, "longer") == [8.0, 16.0, 24.0, 32.0, 40.0]
-    assert blend_lengths(a, b, "extended") == [8.0, 16.0, 32.0, 48.0]
-    _at_bpm(a, 100.0), _at_bpm(b, 100.0)
-    assert blend_lengths(a, b, "auto") == pytest.approx([9.6, 19.2])
-    assert blend_lengths(a, b, "longer") == pytest.approx([9.6, 19.2, 28.8, 38.4])  # 64 beats fits 40 s
-    # Regression: at dance tempos all three settings topped out at 64 beats.
-    _at_bpm(a, 124.0), _at_bpm(b, 124.0)
-    longest = [max(blend_lengths(a, b, s)) for s in ("auto", "longer", "extended")]
-    assert longest[0] < longest[1] < longest[2]
-    _at_bpm(a, 132.0), _at_bpm(b, 132.0)
-    assert blend_lengths(a, b, "extended")[-1] == pytest.approx(128 * 60 / 132)
-    for setting in BLEND_SIZES:
-        assert max(blend_lengths(a, b, setting)) <= BLEND_SIZES[setting].cap
-        b.bpm = 90.0
-        assert blend_lengths(a, b, setting) == [UNMATCHED_BLEND_SECONDS]  # safety still wins
-        b.bpm = 132.0
-    a.bpm = b.bpm = None
-    assert blend_lengths(a, b, "extended") == list(BLEND_SIZES["extended"].fallback)
-
-
 def test_extended_reaches_past_32_s_only_where_the_songs_allow():
     ca = _at_bpm(make_track("ca", 240.0, melody=[(0, 170, 0.8), (170, 240, 0.05)]), 132.0)
     cb = _at_bpm(make_track("cb", 240.0, melody=[(0, 70, 0.05), (70, 240, 0.8)]), 132.0)
@@ -535,7 +551,7 @@ def test_extended_reaches_past_32_s_only_where_the_songs_allow():
     auto = plan_windows([ca, cb])[1][0]
     windows, overlaps = plan_windows([ca, cb], transition_length="extended")
     assert auto <= MAX_BLEND_SECONDS < overlaps[0]
-    assert "Extended blend into cb (128 beats, 58 s)" in windows[0].reason
+    assert "Extended blend into cb over 53 s (116 beats) and lands as its vocals come in" in windows[0].reason
     check_windows([ca, cb], windows)
 
     # A vocal clash still keeps the blend well short of the cap.

@@ -5,8 +5,7 @@ import pytest
 import soundfile as sf
 from fastapi.testclient import TestClient
 
-from backend.api.schemas import Track
-from backend.logic.windows import blend_lengths
+from backend.logic.windows import BLEND_SIZES
 from backend.main import app
 
 
@@ -284,10 +283,9 @@ def test_full_pipeline(client):
     assert manifest["overlap_preference"] == 0.5
     assert len(manifest["transitions"]) == 2
     # Each seam asks for a blend length picked for its own pair of songs.
-    tracks = {i: Track(**client.get(f"/api/tracks/{i}").json()) for i in ordered}
-    for t in manifest["transitions"]:
-        ladder = blend_lengths(tracks[t["from_id"]], tracks[t["to_id"]])
-        assert any(t["requested_overlap_seconds"] == pytest.approx(o) for o in ladder)
+    for t, w in zip(manifest["transitions"], manifest["windows"]):
+        assert 0 < t["requested_overlap_seconds"] <= BLEND_SIZES["auto"].cap
+        assert f"over {t['requested_overlap_seconds']:.0f} s" in w["reason"]
     # Full mode: tones have no melody to hand over, so every song plays whole.
     assert manifest["mode"] == "full"
     assert [(w["track_id"], w["start_seconds"], w["end_seconds"]) for w in manifest["windows"]] == [
@@ -314,9 +312,8 @@ def test_mix_and_preview_accept_a_transition_length(client):
     res = client.post("/api/mix", json=body)
     assert res.status_code == 200, res.text
     t = res.json()["manifest"]["transitions"][0]
-    tracks = [Track(**client.get(f"/api/tracks/{i}").json()) for i in ids[:2]]
-    ladder = blend_lengths(*tracks, "extended")
-    assert any(t["requested_overlap_seconds"] == pytest.approx(o) for o in ladder)
+    assert 0 < t["requested_overlap_seconds"] <= BLEND_SIZES["extended"].cap
+    assert f"over {t['requested_overlap_seconds']:.0f} s" in res.json()["manifest"]["windows"][0]["reason"]
     assert client.post("/api/calibration/preview", json=body).status_code == 200
 
 

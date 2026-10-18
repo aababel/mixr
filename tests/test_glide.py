@@ -1,11 +1,12 @@
-"""Tempo glide, split-frequency swap and short-blend fallback."""
+"""Tempo glide, split-frequency swap, far-apart tempos and the short-blend fallback."""
 import numpy as np
 import pytest
 
 from backend.api.schemas import TransitionRequest
 from backend.audio import transition as transition_mod
 from backend.audio.bands import split_bands, swap_gains
-from backend.audio.seam_plan import fit_grid, fold_ratio
+from backend.audio.echo import echo_bars
+from backend.audio.seam_plan import beatless_run, fit_grid, fold_ratio, pulse_curve
 from backend.audio.stretch import rubberband_available
 from backend.audio.transition import render_transition, seam_sample_bounds
 
@@ -192,17 +193,61 @@ def test_grid_hidden_by_a_breakdown_is_found_over_more_audio():
 # ---------------------------------------------------------------- short-blend fallback
 
 
-@pytest.mark.parametrize("requested", [4.0, 12.0])
-def test_far_apart_tempos_get_a_short_blend_on_an_incoming_beat(requested):
+@pytest.mark.parametrize("requested, bars", [(2.0, 1), (12.0, 4)])
+def test_far_apart_tempos_echo_out_with_the_incoming_beat_on_the_bar_line(requested, bars):
     out, ob = clicks(30, 90, seed=7)
     inc, ib = clicks(30, 128, first=0.05, seed=8)
     seam, ap = render_transition(out, inc, SR, ob, ib, req(requested), "final")
     assert ap.tempo_change is None
-    assert 0.5 <= ap.actual_overlap_seconds <= 2.5 * 60 / 128 + 0.05  # about 2 beats
-    assert min(abs(ap.actual_overlap_seconds - b) for b in ib) < 2 / SR  # ends on an incoming beat
-    assert ap.output_duration_seconds == pytest.approx(ap.actual_overlap_seconds)
-    assert any("differ by" in s and "no warp" in s for s in ap.safety_adjustments)
-    assert any(s.startswith("short blend") for s in ap.safety_adjustments)
+    assert ap.applied_eq.startswith("echo-out")
+    assert any("both sides have a beat: echo-out" in s for s in ap.safety_adjustments)
+    p = 60 / 90
+    offset = ap.output_duration_seconds - ap.actual_overlap_seconds  # B's sample 0 in the seam
+    bar_line = offset + 0.05  # B's first beat
+    assert bar_line == pytest.approx(bars * 4 * p, abs=0.05)  # A's last `bars` bars end there
+    a_left = 30 - ap.outgoing_start_seconds
+    assert 0 <= a_left - bar_line <= p + 0.05  # on A's last bar line, so no silent beat before B
+
+
+def test_far_apart_tempos_blend_over_a_beatless_outro():
+    out, ob = _pad_outro(40, 90, 22)  # its last 18 s are a pad with no kick
+    inc, ib = clicks(30, 128, first=0.05, seed=8)
+    seam, ap = render_transition(out, inc, SR, ob, ib, req(8.0), "final")
+    assert any(s.startswith("beatless blend") for s in ap.safety_adjustments)
+    assert ap.tempo_change is None
+    assert ap.actual_overlap_seconds == pytest.approx(8.0, abs=0.5)
+    assert not ap.applied_eq.startswith("echo-out")
+
+def _pad_outro(dur, bpm, beat_until, seed=7):
+    out, ob = clicks(dur, bpm, seed=seed)
+    t = np.arange(int((dur - beat_until) * SR)) / SR
+    pad = sum(np.sin(2 * np.pi * f * t) for f in (220.0, 277.2, 329.6)) * 0.05  # a held chord, no kick
+    noise = np.random.default_rng(1).standard_normal((t.size, 2)) * 0.002
+    out[int(beat_until * SR):] = (pad[:, None] + noise).astype(np.float32)
+    return out, [b for b in ob if b < beat_until]
+
+
+def test_pulse_curve_finds_where_the_kick_stops():
+    out, _ = _pad_outro(40, 90, 22)
+    curve = pulse_curve(out.mean(axis=1), SR, 60 / 90)
+    assert beatless_run(curve, 1.0, 40.0, forward=False, limit=60.0) >= 12.0
+    assert beatless_run(curve, 1.0, 10.0, forward=True, limit=60.0) == 0.0
+    assert beatless_run(curve, 1.0, 40.0, forward=False, limit=8.0) == 8.0
+
+
+@pytest.mark.parametrize("requested, bars", [(None, 1), (2.0, 1), (4.0, 2), (8.0, 4), (30.0, 4)])
+def test_echo_bars_follow_the_requested_length(requested, bars):
+    assert echo_bars(requested, 0.5) == bars
+
+
+@pytest.mark.parametrize("beats", [40, 52])
+def test_a_request_on_a_bar_renders_exactly_that_many_bars(beats):
+    # windows.py aims blends at the incoming song's events in whole bars;
+    # the renderer must not round them to a phrase.
+    out, ob = clicks(60, 120, seed=12)
+    inc, ib = clicks(60, 120, first=0.05, seed=13)
+    _, ap = render_transition(out, inc, SR, ob, ib, req(beats * 0.5), "final")
+    assert ap.actual_overlap_seconds == pytest.approx(beats * 0.5, abs=0.5)
 
 
 def test_missing_rubberband_falls_back_to_short_blend(monkeypatch):

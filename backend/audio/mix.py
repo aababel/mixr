@@ -20,8 +20,10 @@ source_durations_seconds are window lengths, so the timeline math is the
 same as without windows. A first window that starts mid-song fades in, a
 last one that ends mid-song fades out.
 
-Echo-out: each seam gets both tracks' melody_activity, so a seam where both
-sides carry a melody becomes an echo-out instead of a blend (echo.py).
+Echo-out: each seam gets both tracks' melody_activity and kick pulse, so a
+seam where both sides carry a melody, or whose tempos are too far apart to
+beat-match while both sides keep a beat, becomes an echo-out instead of a
+blend (echo.py, transition.py).
 
 Loudness matching: each track gets one gain (loudness.py) applied to its
 whole body AND passed to render_transition for both of its seams, using the
@@ -152,6 +154,8 @@ def render_mix(
                 outgoing_gain_db=db(i), incoming_gain_db=db(i + 1),
                 outgoing_melody=cur_p.melody, incoming_melody=nxt_p.melody,
                 melody_hop_seconds=track.energy_hop_seconds,
+                outgoing_pulse=cur_p.pulse, incoming_pulse=nxt_p.pulse,
+                pulse_hop_seconds=cur_p.pulse_hop or nxt_p.pulse_hop,
                 outgoing_fade_out_seconds=fades[0], incoming_fade_in_seconds=fades[1],
             )
             if loudness_match:
@@ -188,7 +192,7 @@ def render_mix(
     if short:
         limitations.append(
             f"short 2-beat blend instead of the requested overlap at {', '.join(short)} "
-            "(tempos too far apart to glide, or Rubber Band not installed)"
+            "(Rubber Band not installed)"
         )
     unmatched = [f"{t.from_id}->{t.to_id}" for t in transitions
                  if any("beat alignment skipped" in n or "only the first beat" in n
@@ -203,8 +207,15 @@ def render_mix(
             if t.applied_eq and t.applied_eq.startswith("echo-out")]
     if echo:
         limitations.append(
-            f"echo-out instead of a blend at {', '.join(echo)}: both songs have lead melody "
-            "at the seam, so the requested overlap was not used"
+            f"echo-out instead of a blend at {', '.join(echo)}: both songs carry lead melody "
+            "there, or their tempos are too far apart to beat-match"
+        )
+    beatless = [f"{t.from_id}->{t.to_id}" for t in transitions
+                if any(n.startswith("beatless blend") for n in t.safety_adjustments)]
+    if beatless:
+        limitations.append(
+            f"beats not matched at {', '.join(beatless)}: tempos too far apart, so it blends "
+            "where one side has no steady beat"
         )
     limitations.extend(window_notes)
     missing_beats = [t.id for t in tracks if not t.beats_seconds]

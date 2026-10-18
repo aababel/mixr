@@ -33,13 +33,16 @@ Every seam scores each (A end, B start) pair on
 Any part of a song can meet any part of the next one: set mode picks both
 cues freely, so the two parts that match best meet wherever they are.
 
-How long each blend runs depends on the two songs (plan_windows): every
-seam is scored at whole phrases of 16, 32 and 64 beats of the outgoing
-song's tempo (up to the renderer's 32 s), and each (A end, B start) takes
-the length that scores best there. Longer blends earn a bonus when the
-notes line up and lose it when the two melodies would sing over each other;
-tempos too far apart to beat-match get one short blend. The A/B
-preference leans every seam longer or shorter.
+How long each blend runs depends on the two songs (plan_windows): from each
+B start, the blend can land on any of B's next events (a vocal coming in,
+a chorus or other section, an energy lift, a drop, a phrase), counted in
+whole bars of matched beats, as long as A can carry it (it may not start
+before A's last vocal line or its last lift) and the two melodies don't
+sing over each other for long. Each (A end, B start) takes the landing that
+scores best there; longer blends earn a bonus when the notes line up.
+Tempos too far apart to beat-match get a beatless blend where one side has
+no steady kick, else an echo-out. The A/B preference and the transition
+length setting lean every seam longer or shorter.
 
 and each window pays a length cost: full mode trims as little as possible
 (sparse stretches are cheap to lose), set mode sizes windows to hit
@@ -59,9 +62,10 @@ from backend.audio.cues import BEATS_PER_BAR
 from backend.audio.echo import CLASH_SECONDS, MELODY_CLASH, melody_clash
 from backend.audio.edges import MAX_EDGE_SECONDS, MIN_DROP_DB
 from backend.audio.harmony import Chroma, compatibility
-from backend.audio.seam_plan import MAX_GLIDE_DEVIATION, deviation, fold_ratio
-from backend.audio.transition import DEFAULT_SAFETY, SafetyLimits
-from backend.audio.windows import MIN_WINDOW_SECONDS
+from backend.audio.echo import ECHO_BARS
+from backend.audio.seam_plan import MAX_GLIDE_DEVIATION, beatless_run, deviation, fold_ratio
+from backend.audio.transition import BEATLESS_MIN_SECONDS, DEFAULT_SAFETY, SafetyLimits
+from backend.audio.windows import MIN_WINDOW_SECONDS, stored_pulse
 
 # Seam quality. Melody handoff matters most; keep these summing to 1.0.
 WEIGHTS = {"handoff": 0.25, "groove": 0.15, "flow": 0.15, "payoff": 0.15, "energy": 0.05,
@@ -146,20 +150,39 @@ BUILD_MAX_SECONDS = 24.0
 # drop only replaces a blend that would be weak (clean ones score 0.75-0.9).
 DROP_BASE = 0.2
 DROP_STRENGTH_WEIGHT = 0.25
-# Tempos further apart than the renderer can glide get a ~2-beat blend: the
-# blend's quality is scaled by this, so a drop (cut) can take over.
-UNMATCHED_BLEND = 0.6
+# Tempos too far apart to beat-match: an echo-out keeps this share of the
+# seam's quality, a beatless blend (one side has no kick) nearly all of it,
+# and a drop cut (with its silent beat) this share, so the cut only wins
+# where B's drop is strong and the cue is poor for anything else.
+ECHO_BLEND = 0.8
+BEATLESS_BLEND = 0.95
+UNMATCHED_DROP = 0.8
 # The reason says B takes over on an energy jump at or above this rise.
 LANDING_RISE = 0.5
 
-# Blend length (plan_windows): each seam is scored at whole phrases of the
-# outgoing song's beat and takes the length that suits those two songs.
-# Under 16 beats a beat-matched blend reads as a cut, not a mix.
-BLEND_FALLBACK_SECONDS = (4.0, 8.0, 16.0, 24.0)  # no tempo to count beats in
-MIN_BLEND_SECONDS = 4.0
+# Blend length (plan_windows). A blend plays B's opening under A's ending
+# and lands (bass swap, bands.py) on B's next musical event: its vocal
+# coming in, a section boundary, an energy lift, or at least a phrase or
+# half-phrase line. Each (A end, B start) is offered every landing of B
+# within the setting's cap, counted in whole bars of B so the renderer
+# lands exactly there, and limited by how long A can carry a blend: back to
+# its last event (a vocal line starting after a pause, or its energy
+# lifting into a chorus or drop), so B never comes in under A's hook.
+MIN_BLEND_SECONDS = 4.0  # reach is 0 here (and for anything shorter)
 MAX_BLEND_SECONDS = DEFAULT_SAFETY.max_overlap_seconds
-# Tempos the renderer can't glide between get a short blend (it plays ~2 beats).
-UNMATCHED_BLEND_SECONDS = 4.0
+MIN_LANDING_BEATS = 8  # nearer landings read as a cut: the next one is used
+LANDING_SECONDS_NO_TEMPO = 4.0  # the same without a tempo to count beats in
+# Event strength by kind, 0-1: how much a landing there is worth. Events
+# within a beat of each other merge, each extra kind adding EVENT_STACK.
+EVENT_STRENGTH = {"chorus": 1.0, "drop": 1.0, "vocal": 0.9, "section": 0.7, "phrase": 0.5,
+                  "break": 0.5, "half": 0.25, "outro": 0.1}
+EVENT_NAMES = ("chorus", "drop", "vocal", "rise", "section", "break", "phrase", "half", "outro")
+EVENT_STACK = 0.15
+CLASH_BLEND_SECONDS = 8.0  # longest blend where both songs carry melody at the seam
+STACK_LIMIT = 0.55  # _Seam.stack from which the two melodies sing over each other
+LANDING_WEIGHT = 0.1  # seam quality per unit of landing strength
+RISE_STEP = 0.15  # energy step (8 s after vs before a bar line) that counts as a lift
+ONSET_QUIET_SECONDS = 4.0  # a melody coming in after this long without one is a new vocal line
 # A longer blend earns LENGTH_WEIGHT x reach x (LENGTH_BASE + 2 x (harmony - 0.5)
 # - stack + PREFERENCE_LEAN x overlap_preference), reach 0 at MIN_BLEND_SECONDS
 # to 1 at MAX_BLEND_SECONDS. Songs in key ride together for long; songs that
@@ -177,25 +200,24 @@ TransitionLength = Literal["auto", "longer", "extended"]
 
 @dataclass(frozen=True)
 class BlendSize:
-    """The user's transition length setting, as blend lengths to try and how
-    hard to lean toward the long end."""
-    beats: tuple[int, ...]  # phrase lengths to try, in beats of the outgoing song
-    fallback: tuple[float, ...]  # seconds to try without a tempo
+    """The user's transition length setting. The lengths themselves come
+    from the songs (where B's events fall); the setting caps them and leans
+    the choice."""
     cap: float  # longest blend the renderer may play (SafetyLimits.max_overlap_seconds)
     lean: float  # added to overlap_preference
     stack_weight: float  # how strongly two melodies singing at once shorten a blend
-    size_for_longest: bool  # set mode sizes windows for the longest length, not the middle one
+    typical: float  # seconds per seam budgeted before the lengths are known (drop builds, set mode)
+    echo_bars: int  # longest echo-out (tempos too far apart), in outgoing bars
 
 
-# auto: the songs decide. longer: every seam leans long, up to 80 beats and
-# 40 s. extended: up to 128 beats and 60 s, vocal clashes still shorten a
-# blend but half as much, and set-mode windows grow to fit. Every length is
-# whole 16-beat half-phrases, and each setting reaches past the one below it
-# at dance tempos (about 31 s, 39 s and 46 s at 124 BPM).
+# auto: the songs decide, up to 32 s. longer: every seam leans long and may
+# land up to 40 s in, extended up to 60 s, with vocal clashes shortening a
+# blend half as much and set-mode windows sized for long blends. Echo-outs
+# filter out up to 2 bars (auto) or 4.
 BLEND_SIZES: dict[str, BlendSize] = {
-    "auto": BlendSize((16, 32, 64), BLEND_FALLBACK_SECONDS, MAX_BLEND_SECONDS, 0.0, 1.0, False),
-    "longer": BlendSize((16, 32, 48, 64, 80), (8.0, 16.0, 24.0, 32.0, 40.0), 40.0, 1.0, 1.0, False),
-    "extended": BlendSize((16, 32, 64, 96, 128), (8.0, 16.0, 32.0, 48.0, 60.0), 60.0, 1.5, 0.5, True),
+    "auto": BlendSize(MAX_BLEND_SECONDS, 0.0, 1.0, 16.0, 2),
+    "longer": BlendSize(40.0, 1.0, 1.0, 24.0, 4),
+    "extended": BlendSize(60.0, 1.5, 0.5, 40.0, 4),
 }
 
 
@@ -216,6 +238,8 @@ class _Cues:
     tail: float  # fade-out at the song's end, seconds
     drop_only: frozenset = frozenset()  # grid times added only as drop build starts
     chroma: Optional[Chroma] = None
+    pulse: Optional[list] = None  # kick pulse (seam_plan.pulse_curve) from analysis
+    pulse_hop: Optional[float] = None
 
     @property
     def duration(self) -> float:
@@ -258,22 +282,41 @@ class _Seam:
     harmony: Optional[np.ndarray] = None  # (A ends, B starts), None without chroma
     overlap: float = 0.0  # the blend length this seam was scored at
     stack: Optional[np.ndarray] = None  # (A ends, B starts): melody both carry over the blend
+    kind: str = "fixed"  # "blend" | "beatless" | "echo"; "fixed" = choose_windows' given length
+    requests: Optional[np.ndarray] = None  # (B starts,): overlap to ask the renderer for there
+    beats: Optional[int] = None  # blend: matched beats from B's first beat to the landing
+    land: Optional[np.ndarray] = None  # (B starts,): strength of B's event at the landing, 0 = none
+    land_at: Optional[np.ndarray] = None  # (B starts,): the landing, in B's seconds
+    land_what: Optional[list] = None  # (B starts,): EVENT_NAMES entry, "" = a bar line
+    bars: int = 0  # echo: outgoing bars filtered out
+
+    def request(self, j: int) -> float:
+        return float(self.requests[j]) if self.requests is not None else self.overlap
 
 
 @dataclass
 class _SeamChoice:
-    """One seam scored at one or more blend lengths; every (A end, B start)
-    takes the length that scores best there."""
-    options: list[_Seam]  # shortest first
-    score: np.ndarray  # (A ends, B starts): the chosen length's quality plus its length bonus
+    """One seam scored at its candidate lengths; every (A end, B start) takes
+    the best one it may use."""
+    options: list[_Seam]
+    score: np.ndarray  # (A ends, B starts): the chosen option's quality plus its bonuses
     pick: np.ndarray  # (A ends, B starts): index into options
+    valid: list[np.ndarray]  # per option, (A ends, B starts): where it may be used
+    sustain: Optional[list] = None  # per A end: (seconds A can carry a blend, what stops it, when)
+    preference: float = 0.0
+    stack_weight: float = 1.0
+    clash: Optional[np.ndarray] = None  # (A ends, B starts): both carry melody at the seam
 
     def at(self, i: int, j: int) -> _Seam:
         return self.options[int(self.pick[i, j])]
 
+    def value(self, o: _Seam, i: int, j: int) -> float:
+        return float(_option_score(o, self.preference, self.stack_weight)[i, j])
+
 
 def _fixed(seam: _Seam) -> _SeamChoice:
-    return _SeamChoice([seam], seam.quality, np.zeros(seam.quality.shape, dtype=int))
+    shape = seam.quality.shape
+    return _SeamChoice([seam], seam.quality, np.zeros(shape, dtype=int), [np.ones(shape, dtype=bool)])
 
 
 def _length_bonus(seam: _Seam, preference: float, stack_weight: float = 1.0) -> np.ndarray:
@@ -288,25 +331,22 @@ def _length_bonus(seam: _Seam, preference: float, stack_weight: float = 1.0) -> 
     return np.where(seam.is_drop, 0.0, bonus)  # a drop's length is its build, not a blend
 
 
-def _choose_length(options: list[_Seam], preference: float, stack_weight: float) -> _SeamChoice:
-    scores = np.stack([o.quality + _length_bonus(o, preference, stack_weight) for o in options])
+def _option_score(o: _Seam, preference: float, stack_weight: float) -> np.ndarray:
+    score = o.quality + _length_bonus(o, preference, stack_weight)
+    if o.land is not None:
+        score = score + np.where(o.is_drop, 0.0, LANDING_WEIGHT * o.land[None, :])
+    return score
+
+
+def _choose(options: list[_Seam], valid: list[np.ndarray], preference: float, stack_weight: float,
+            sustain: Optional[list] = None) -> _SeamChoice:
+    """Every cell takes its best valid option (a drop is valid everywhere:
+    its length is its build)."""
+    scores = np.stack([np.where(ok | o.is_drop, _option_score(o, preference, stack_weight), -np.inf)
+                       for o, ok in zip(options, valid)])
     pick = np.argmax(scores, axis=0)
-    return _SeamChoice(options, np.take_along_axis(scores, pick[None], 0)[0], pick)
-
-
-def blend_lengths(a: Track, b: Track, transition_length: str = "auto") -> list[float]:
-    """Blend lengths to try between A and B, shortest first: whole phrases
-    (16-64 beats, up to 80 for "longer" and 128 for "extended") of A's beat within the setting's
-    cap, one short blend when the tempos can't be beat-matched, a plain time
-    ladder without tempo."""
-    size = BLEND_SIZES[transition_length]
-    if not tempos_blend(a, b):
-        return [UNMATCHED_BLEND_SECONDS]
-    if not a.bpm or not math.isfinite(a.bpm) or a.bpm <= 0:
-        return list(size.fallback)
-    beat = 60.0 / a.bpm
-    fits = [n * beat for n in size.beats if MIN_BLEND_SECONDS <= n * beat <= size.cap]
-    return fits or [float(np.clip(16 * beat, MIN_BLEND_SECONDS, size.cap))]
+    return _SeamChoice(options, np.take_along_axis(scores, pick[None], 0)[0], pick, valid, sustain,
+                       preference, stack_weight)
 
 
 def tempos_blend(a: Track, b: Track) -> bool:
@@ -316,6 +356,222 @@ def tempos_blend(a: Track, b: Track) -> bool:
         return True
     ratio, _ = fold_ratio(60.0 / a.bpm, 60.0 / b.bpm)
     return deviation(ratio) <= MAX_GLIDE_DEVIATION
+
+
+def _bar_lines(track: Track) -> np.ndarray:
+    """Bar lines on the song's beat grid, phased to its phrase starts."""
+    beats = np.asarray(track.beats_seconds, dtype=np.float64)
+    if beats.size < BEATS_PER_BAR:
+        return beats
+    k0 = 0
+    if track.phrase_starts_seconds:
+        k0 = int(np.argmin(np.abs(beats - track.phrase_starts_seconds[0]))) % BEATS_PER_BAR
+    return beats[k0::BEATS_PER_BAR]
+
+
+def _melody_onsets(c: _Cues) -> np.ndarray:
+    """Where the melody comes in after ONSET_QUIET_SECONDS or more without
+    one (smoothed as _quiet_run): a new vocal line."""
+    if c.melody is None or not c.hop:
+        return np.zeros(0)
+    n = max(1, int(round(MELODY_SMOOTH_SECONDS / c.hop)))
+    on = np.convolve(c.melody, np.ones(n) / n, mode="same") >= QUIET_MELODY
+    need = int(round(ONSET_QUIET_SECONDS / c.hop))
+    starts = np.flatnonzero(on[1:] & ~on[:-1]) + 1
+    quiet_from = np.concatenate([[0], np.flatnonzero(~on[1:] & on[:-1]) + 1])
+    out = []
+    for k in starts:
+        last_off = quiet_from[quiet_from < k]
+        if last_off.size and k - last_off[-1] >= need:
+            out.append(k * c.hop)
+    return np.array(out)
+
+
+def _rise(c: _Cues, t: float) -> float:
+    """Energy over the DROP_LOOK_SECONDS after t minus the DROP_LOOK_SECONDS before."""
+    step = _mean(c.energy, c.hop, t, t + DROP_LOOK_SECONDS) - _mean(c.energy, c.hop, t - DROP_LOOK_SECONDS, t)
+    return 0.0 if math.isnan(step) else step
+
+
+def _events(c: _Cues) -> list[tuple[float, float, str]]:
+    """The song's musical events, (time, strength, what), where a blend into
+    it can land: its vocal or melody coming in, section boundaries (named by
+    label), energy lifts at bar lines, and its phrase and half-phrase lines.
+    Events within a beat of each other merge into the strongest, named by
+    the most telling kind."""
+    t = c.track
+    beat = 60.0 / t.bpm if t.bpm else None
+    raw: list[tuple[float, float, str]] = []
+    for p in t.phrase_starts_seconds:
+        raw.append((p, EVENT_STRENGTH["phrase"], "phrase"))
+        if beat:
+            raw.append((p + 4 * BEATS_PER_BAR * beat, EVENT_STRENGTH["half"], "half"))
+    for prev, sec in zip(t.sections, t.sections[1:]):
+        what = sec.label if sec.label in EVENT_STRENGTH else "section"
+        strength = EVENT_STRENGTH[what]
+        if what == "section":
+            strength += 0.3 * float(np.clip((sec.energy - prev.energy) / 0.3, 0.0, 1.0))
+        raw.append((sec.start_seconds, strength, what))
+    bars = _bar_lines(t)
+    for on in _melody_onsets(c):
+        raw.append((float(bars[np.argmin(np.abs(bars - on))]) if bars.size else on,
+                    EVENT_STRENGTH["vocal"], "vocal"))
+    if bars.size and c.energy is not None:
+        rise = np.array([_rise(c, b) for b in bars])
+        for k, r in enumerate(rise):
+            if r >= RISE_STEP and r >= rise[max(0, k - 2):k + 3].max():
+                raw.append((float(bars[k]), 0.5 + 0.5 * min(1.0, (r - RISE_STEP) / RISE_STEP), "rise"))
+    raw = sorted(e for e in raw if 0.0 < e[0] < c.duration)
+    tol = 0.75 * beat if beat else 0.6
+    events, group = [], []
+    for e in raw + [(math.inf, 0.0, "")]:
+        if group and e[0] - group[0][0] > tol:
+            top = max(group, key=lambda g: g[1])
+            kinds = {g[2] for g in group}
+            what = next(k for k in EVENT_NAMES if k in kinds)
+            events.append((top[0], min(1.2, top[1] + EVENT_STACK * (len(kinds) - 1)), what))
+            group = []
+        group.append(e)
+    return events
+
+
+def _sustain(c: _Cues, end: float, cap: float, onsets: np.ndarray) -> tuple[float, str, float]:
+    """How long A can carry a blend that ends at `end`: back to its last
+    event, so the blend never starts before A's last vocal line or under its
+    lift into a chorus or drop. (seconds, what, when); what "" = nothing
+    within cap."""
+    best = (cap, "", end - cap)
+    for on in onsets:
+        if end - cap < on < end and end - on < best[0]:
+            best = (end - on, "vocal", float(on))
+    lifts = {round(s.start_seconds, 3): s.label for s in c.track.sections[1:] if s.label in ("chorus", "drop")}
+    for p in c.track.phrase_starts_seconds:
+        if end - cap < p < end and end - p < best[0]:
+            label = lifts.get(round(p, 3))
+            if label or _rise(c, p) >= RISE_STEP:
+                best = (end - p, label or "rise", float(p))
+    return best
+
+
+def _blend_points(a: _Cues, b: _Cues) -> tuple[np.ndarray, np.ndarray]:
+    """Where the blend sits: before A's fade-out tail at its own end, after
+    B's lead-in at its own start."""
+    return (np.array([e - a.tail if e >= a.duration else e for e in a.grid]),
+            np.array([s + b.head if s <= 0 else s for s in b.grid]))
+
+
+def _fill_fallback(options: list[_Seam], valid: list[np.ndarray], rooms: list[np.ndarray], tol: float) -> None:
+    """Cells where no event landing fits its option's room (A ends, B
+    starts): any length that fits, else the shortest."""
+    none = ~np.any(valid, axis=0)
+    if none.any():
+        for o, ok, room in zip(options, valid, rooms):
+            ok |= none & (o.requests[None, :] <= room + tol)
+        none = ~np.any(valid, axis=0)
+        shortest = int(np.argmin([o.requests.min() for o in options]))
+        valid[shortest] |= none
+
+
+def _edge_clash(a: _Cues, b: _Cues, ends, starts) -> np.ndarray:
+    """(A ends, B starts): both edges carry melody over echo.py's
+    CLASH_SECONDS, so the renderer swaps the vocals or echoes out."""
+    out_edge = np.array([_mean(a.melody, a.hop, e - CLASH_SECONDS, e) for e in ends])
+    in_edge = np.array([_mean(b.melody, b.hop, s, s + CLASH_SECONDS) for s in starts])
+    return (_nan_to(out_edge, 0.0) >= MELODY_CLASH)[:, None] & (_nan_to(in_edge, 0.0) >= MELODY_CLASH)[None, :]
+
+
+def _landing_choice(a: _Cues, b: _Cues, size: BlendSize, preference: float, drop_at: dict) -> _SeamChoice:
+    """Tempos that can be beat-matched: every landing on one of B's events
+    within the cap, counted in whole bars from B's first beat."""
+    ends, starts = _blend_points(a, b)
+    heads = starts - b.grid
+    onsets = _melody_onsets(a)
+    sustain = [_sustain(a, e, size.cap, onsets) for e in ends]
+    limit = np.array([s[0] for s in sustain])
+    # Two melodies at the seam: however the songs line up, keep it short.
+    clash = _edge_clash(a, b, ends, starts)
+    cell = np.where(clash, np.minimum(limit[:, None], CLASH_BLEND_SECONDS), limit[:, None])
+    periods = None
+    if a.track.bpm and b.track.bpm:
+        _, factor = fold_ratio(60.0 / a.track.bpm, 60.0 / b.track.bpm)
+        p_in = 60.0 / b.track.bpm * factor  # the renderer counts B's beats against A's
+        periods = (p_in, 0.5 * (60.0 / a.track.bpm + p_in))
+    first = b.track.beats_seconds[0] if b.track.beats_seconds else 0.0
+    found: dict[float, dict[int, tuple[float, str, float]]] = {}
+    events = _events(b)
+    for j, s in enumerate(b.grid):
+        if round(float(s), 3) in b.drop_only:
+            continue
+        for t, strength, what in events:
+            if periods:
+                p_in, p_avg = periods
+                n = BEATS_PER_BAR * round((t - (s if s > 0 else first)) / p_in / BEATS_PER_BAR)
+                key, length = float(n), n * p_avg - heads[j]
+                if n < MIN_LANDING_BEATS:
+                    continue
+            else:
+                key = length = round(t - starts[j], 1)
+                if length < LANDING_SECONDS_NO_TEMPO:
+                    continue
+            if length <= size.cap + 1e-6 and strength > found.setdefault(key, {}).get(j, (0.0,))[0]:
+                found[key][j] = (strength, what, t)
+    unit = periods[1] * BEATS_PER_BAR if periods else 1.0
+    for lim in set(np.minimum(cell, size.cap).ravel().tolist()):  # the longest bar count A can carry
+        found.setdefault(float(max(1, math.floor(lim / unit)) * (BEATS_PER_BAR if periods else 1)), {})
+    options, valid, rooms = [], [], []
+    for key in sorted(found):
+        span = key * periods[1] if periods else key
+        seam = _score_seam(a, b, span, drop_at)
+        req = np.maximum(span - heads, DEFAULT_SAFETY.min_overlap_seconds) if periods else np.full(len(starts), span)
+        land, at, what = np.zeros(len(starts)), starts + req, [""] * len(starts)
+        for j, (strength, w, t) in found[key].items():
+            land[j], at[j], what[j] = strength, t, w
+        seam.kind, seam.requests, seam.land, seam.land_at, seam.land_what = "blend", req, land, at, what
+        seam.beats = int(key) if periods else None
+        options.append(seam)
+        # A blend that would sing both melodies across its length stays short too.
+        room = np.where(seam.stack >= STACK_LIMIT, np.minimum(cell, CLASH_BLEND_SECONDS), cell)
+        rooms.append(room)
+        valid.append((land[None, :] > 0) & (req[None, :] <= room + unit / BEATS_PER_BAR))
+    _fill_fallback(options, valid, rooms, unit / BEATS_PER_BAR)
+    choice = _choose(options, valid, preference, size.stack_weight, sustain)
+    choice.clash = clash
+    return choice
+
+
+def _unmatched_choice(a: _Cues, b: _Cues, size: BlendSize, preference: float, drop_at: dict) -> _SeamChoice:
+    """Tempos too far apart to beat-match. Where A's ending or B's opening
+    has no steady kick (as the renderer will measure it) and the two don't
+    both carry melody there, a beatless blend as long as that stretch;
+    elsewhere an echo-out of 1, 2 or 4 bars of A (up to the setting's
+    echo_bars and what A can carry)."""
+    ends, starts = _blend_points(a, b)
+    limit = np.array([_sustain(a, e, size.cap, _melody_onsets(a))[0] for e in ends])
+    run_out = np.array([beatless_run(a.pulse, a.pulse_hop, e, False, size.cap) for e in ends])
+    run_in = np.array([beatless_run(b.pulse, b.pulse_hop, s, True, size.cap) for s in starts])
+    run = np.maximum(run_out[:, None], run_in[None, :])
+    beatless = (run >= BEATLESS_MIN_SECONDS) & ~_edge_clash(a, b, ends, starts)  # two melodies: echo out
+    seconds = np.floor(run)
+    options, valid = [], []
+    for length in sorted(set(seconds[beatless].tolist())):
+        seam = _score_seam(a, b, length, drop_at, factor=BEATLESS_BLEND)
+        seam.kind, seam.requests = "beatless", np.full(len(starts), length)
+        options.append(seam)
+        valid.append(beatless & (seconds == length))
+    beat = 60.0 / a.track.bpm
+    for bars in sorted((n for n in ECHO_BARS if n <= size.echo_bars), reverse=True):  # ties: the longest
+        length = bars * BEATS_PER_BAR * beat
+        seam = _score_seam(a, b, length, drop_at, factor=ECHO_BLEND)
+        seam.kind, seam.bars, seam.requests = "echo", bars, np.full(len(starts), length)
+        options.append(seam)
+        valid.append(~beatless & ((length <= limit[:, None] + beat) | (bars == 1)))
+    return _choose(options, valid, preference, size.stack_weight)
+
+
+def _seam_choice(a: _Cues, b: _Cues, size: BlendSize, preference: float, drop_at: dict) -> _SeamChoice:
+    if tempos_blend(a.track, b.track):
+        return _landing_choice(a, b, size, preference, drop_at)
+    return _unmatched_choice(a, b, size, preference, drop_at)
 
 
 def find_drops(track: Track) -> list[tuple[float, float]]:
@@ -391,7 +647,9 @@ def _cues(track: Track) -> _Cues:
     tail = _measured_edge(track, FADE_OUT_KEY)
     if tail is None:
         tail = _edge_seconds(energy, hop, from_end=True)
-    return _Cues(track, np.array([0.0, *inner, duration]), kind, melody, energy, hop, head, tail)
+    pulse, pulse_hop = stored_pulse(track)
+    return _Cues(track, np.array([0.0, *inner, duration]), kind, melody, energy, hop, head, tail,
+                 pulse=pulse, pulse_hop=pulse_hop)
 
 
 def _measured_edge(track: Track, key: str) -> Optional[float]:
@@ -491,7 +749,10 @@ def _quiet_run(c: _Cues, t: float, forward: bool) -> float:
     return float((hits[0] if hits.size else seg.size) * c.hop)
 
 
-def _score_seam(a: _Cues, b: _Cues, overlap: float, drop_at: Optional[dict] = None) -> _Seam:
+def _score_seam(a: _Cues, b: _Cues, overlap: float, drop_at: Optional[dict] = None,
+                factor: float = 1.0) -> _Seam:
+    """The seam scored at one blend length. factor scales the blend's quality
+    (an echo-out or beatless blend in place of a beat-matched one)."""
     drop_at = drop_at or {}
     span = max(overlap, CLASH_SECONDS)
     # Where the blend sits: before A's fade-out tail at its own end, after
@@ -513,9 +774,7 @@ def _score_seam(a: _Cues, b: _Cues, overlap: float, drop_at: Optional[dict] = No
     handoff = 1.0 - (0.5 * np.sqrt(x * y) + 0.3 * x + 0.2 * y) + 0.3 * falling[:, None]
     # Echo-out is judged on echo.py's fixed CLASH_SECONDS at each edge, not on
     # span: with a long overlap the two can disagree.
-    out_edge = np.array([_mean(a.melody, a.hop, e - CLASH_SECONDS, e) for e in ends])
-    in_edge = np.array([_mean(b.melody, b.hop, s, s + CLASH_SECONDS) for s in starts])
-    clash = (_nan_to(out_edge, 0.0) >= MELODY_CLASH)[:, None] & (_nan_to(in_edge, 0.0) >= MELODY_CLASH)[None, :]
+    clash = _edge_clash(a, b, ends, starts)
     handoff = np.clip(handoff - CLASH_PENALTY * clash, 0.0, 1.0)
     # How much melody the two stack over the blend (unknown counts as none):
     # the longer the blend, the longer that lasts.
@@ -567,8 +826,8 @@ def _score_seam(a: _Cues, b: _Cues, overlap: float, drop_at: Optional[dict] = No
                + WEIGHTS["flow"] * flow + WEIGHTS["payoff"] * payoff[None, :]
                + WEIGHTS["energy"] * energy + WEIGHTS["structure"] * structure
                + WEIGHTS["harmony"] * (harmony if harmony is not None else NEUTRAL))
-    if not tempos_blend(a.track, b.track):
-        quality = quality * UNMATCHED_BLEND
+    quality = quality * factor
+    drop_factor = 1.0 if tempos_blend(a.track, b.track) else UNMATCHED_DROP
 
     is_drop = np.zeros_like(quality, dtype=bool)
     drop_cols = [(j, drop_at[round(float(s), 3)][1]) for j, s in enumerate(b.grid)
@@ -576,7 +835,7 @@ def _score_seam(a: _Cues, b: _Cues, overlap: float, drop_at: Optional[dict] = No
     if drop_cols:
         leaving = _nan_to(np.clip(e_out / FULL_ENERGY, 0.0, 1.0), NEUTRAL)
         for j, strength in drop_cols:
-            q = DROP_BASE + DROP_STRENGTH_WEIGHT * strength + 0.1 * leaving + 0.1 * st_out
+            q = drop_factor * (DROP_BASE + DROP_STRENGTH_WEIGHT * strength + 0.1 * leaving + 0.1 * st_out)
             is_drop[:, j] = q > quality[:, j]
             quality[:, j] = np.maximum(quality[:, j], q)
             if round(float(b.grid[j]), 3) in b.drop_only:
@@ -605,6 +864,15 @@ def _renderer_echoes(a: _Cues, a_start: float, a_end: float,
     clash, _, _ = melody_clash(_window_melody(a, a_start, a_end), _window_melody(b, b_start, b_end),
                                a.hop, a_end - a_start, tail, head)
     return clash
+
+
+def _renderer_beatless(a: _Cues, i: int, b: _Cues, j: int, limit: float = MAX_BLEND_SECONDS) -> bool:
+    """Whether transition.py will play a seam between tempos it can't match
+    as a beatless blend: one side has no steady kick at the seam for
+    BEATLESS_MIN_SECONDS (the same pulse curve and test the renderer uses)."""
+    e, s = _blend_points(a, b)
+    return max(beatless_run(a.pulse, a.pulse_hop, e[i], False, limit),
+               beatless_run(b.pulse, b.pulse_hop, s[j], True, limit)) >= BEATLESS_MIN_SECONDS
 
 
 def best_section(track: Track) -> Optional[tuple[float, float]]:
@@ -756,11 +1024,19 @@ def _start_text(c: _Cues, s: float, seam: Optional[_Seam], j: int) -> str:
     if here is not None and here.label in ("intro", "break") and _on_boundary(c.track.sections, s):
         text += f" (its {here.label})"
     full = seam.in_full[j]
+    if seam.kind == "echo":
+        text += ", right on the downbeat under the outgoing song's echo"
+        return text + (f", where {_melody_phrase(float(seam.in_level[j]))}" if not math.isnan(full) else "")
     if seam.in_rise is not None and seam.in_rise[j] >= LANDING_RISE:
-        land = s + (0.0 if s > 0 else c.head) + seam.span
-        near = c.grid[np.argmin(np.abs(c.grid - land))]
-        if abs(near - land) <= 0.3 * seam.span:
-            land = float(near)  # the renderer lands whole-phrase blends on the cue grid
+        if seam.land_at is not None:
+            land = float(seam.land_at[j])
+        elif seam.requests is not None:
+            land = s + (0.0 if s > 0 else c.head) + float(seam.request(j))
+        else:
+            land = s + (0.0 if s > 0 else c.head) + seam.span
+            near = c.grid[np.argmin(np.abs(c.grid - land))]
+            if abs(near - land) <= 0.3 * seam.span:
+                land = float(near)  # the renderer lands whole-phrase blends on the cue grid
         return text + (f", building under the outgoing song, and takes over at "
                        f"{_clock(land)} as its energy jumps")
     if not math.isnan(full):
@@ -790,42 +1066,72 @@ def _end_text(c: _Cues, e: float, seam: Optional[_Seam], i: int) -> str:
     return text
 
 
-def _length_text(c: _Cues, nxt: _Cues, seam: _Seam, options: list[_Seam], i: int, j: int,
-                 capped: bool) -> str:
-    """Why the blend into the next song is as long as it is ("" if there was no choice)."""
-    beats = f"{round(seam.overlap * c.track.bpm / 60.0)} beats, " if c.track.bpm else ""
-    size = f"{beats}{seam.overlap:.0f} s"
-    if not tempos_blend(c.track, nxt.track):
-        return (f"Short blend into {nxt.name} ({size}): their tempos are too far apart "
-                f"to beat-match for long, at any transition length.")
-    if len(options) < 2:
+LANDING_TEXT = {
+    "chorus": "lands on its chorus", "drop": "lands on its drop", "vocal": "lands as its vocals come in",
+    "rise": "lands as its energy lifts", "section": "lands on its next section", "break": "lands on its break",
+    "phrase": "lands on its next phrase", "half": "lands halfway through a phrase",
+    "outro": "lands on its outro", "": "lands on a bar line",
+}
+SUSTAIN_TEXT = {"vocal": "last vocal line", "chorus": "chorus", "drop": "drop", "rise": "energy lift"}
+
+
+def _tempos(c: _Cues, nxt: _Cues) -> str:
+    return f"{c.track.bpm:.0f} and {nxt.track.bpm:.0f} BPM"
+
+
+def _length_text(c: _Cues, nxt: _Cues, seam: _Seam, choice: _SeamChoice, i: int, j: int,
+                 capped: bool, cap: float) -> str:
+    """How the seam into the next song plays and why it is as long as it is
+    ("" for choose_windows' given length)."""
+    seconds = seam.request(j)
+    if seam.kind == "echo":
+        bars = "bar" if seam.bars == 1 else f"{seam.bars} bars"
+        return (f"Their tempos ({_tempos(c, nxt)}) are too far apart to beat-match and both have a beat, "
+                f"so it echoes out over its last {bars} as its phrase ends and {nxt.name} comes in on "
+                f"its downbeat under the echo.")
+    if seam.kind == "beatless":
+        e, s = _blend_points(c, nxt)
+        run_out = beatless_run(c.pulse, c.pulse_hop, e[i], False, c.duration)
+        run_in = beatless_run(nxt.pulse, nxt.pulse_hop, s[j], True, nxt.duration)
+        if run_out >= run_in:
+            return (f"Their tempos ({_tempos(c, nxt)}) are too far apart to beat-match, but its last "
+                    f"{run_out:.0f} s have no beat, so {nxt.name} blends in under them over "
+                    f"{seconds:.0f} s with no beats to clash.")
+        beat_at = _clock(s[j] + run_in)
+        lands = (f"lands as its beat comes in at {beat_at}" if run_in - seconds <= 1.5
+                 else f"lands ahead of its beat, which comes in at {beat_at}")
+        return (f"Their tempos ({_tempos(c, nxt)}) are too far apart to beat-match, but {nxt.name} opens "
+                f"without a beat, so it blends in under this song over {seconds:.0f} s and {lands}.")
+    if seam.kind != "blend":
         return ""
-    # Past the auto cap only the longer settings reach.
-    extended = seam.overlap > MAX_BLEND_SECONDS + 1e-6
+    beats = f" ({seam.beats} beats)" if seam.beats else ""
+    what, at = seam.land_what[j], float(seam.land_at[j])
+    lead = "Extended blend into" if seconds > MAX_BLEND_SECONDS + 1e-6 else "Blends into"
+    lands = LANDING_TEXT[what] if what or seam.beats else "lands"  # no tempo: no bar lines
+    text = f"{lead} {nxt.name} over {seconds:.0f} s{beats} and {lands} at {_clock(at)}"
     if capped:
-        if extended:
-            return f"Extended blend into {nxt.name} ({size}), the longest that fits these windows."
-        return f"Blends into {nxt.name} over {size}, the longest that fits these windows."
-    longest = options[-1]
-    if seam is longest:
-        if seam.harmony is not None and seam.harmony[i, j] >= HARMONY_GOOD:
-            why = "their notes line up"
-        elif seam.quality[i, j] >= POOR_SEAM and seam.handoff[i, j] >= POOR_HANDOFF:
-            why = "the melody hands over cleanly the whole way"
-        else:
-            why = "no shorter one scored better here"
-        return f"{'Extended' if extended else 'Long'} blend into {nxt.name} ({size}): {why}."
-    if extended:
-        return f"Extended blend into {nxt.name} ({size}), the length that suits this pair best."
-    if seam is options[0]:
-        if longest.harmony is not None and longest.harmony[i, j] < HARMONY_POOR:
-            why = "their notes rub over a longer stretch"
-        elif longest.handoff[i, j] < seam.handoff[i, j] - 0.05:
-            why = "a longer blend would stack the two melodies"
-        else:
-            why = "a longer one scored worse here"
-        return f"Short blend into {nxt.name} ({size}): {why}."
-    return f"Blends into {nxt.name} over {size}, the length that suits this pair best."
+        return text + ", the longest landing that fits these windows."
+    if choice.clash is not None and choice.clash[i, j] and any(
+            o.land is not None and o.land[j] > 0 and o.request(j) > CLASH_BLEND_SECONDS + 1.0
+            for o in choice.options):
+        return text + "; both songs carry melody at the seam, so it stays short instead of landing later."
+    # The next stronger landing it passed up, and what ruled it out.
+    later = [(o.request(j), k) for k, o in enumerate(choice.options)
+             if o.land is not None and o.land[j] > seam.land[j] and o.request(j) > seconds
+             and not choice.valid[k][i, j]]
+    if not later:
+        return text + "."
+    o = choice.options[min(later)[1]]
+    beat = 60.0 / c.track.bpm if c.track.bpm else 1.0
+    sustain = choice.sustain[i] if choice.sustain else None
+    if sustain and sustain[1] and o.request(j) > sustain[0] + beat:
+        return (text + f"; a later landing would start the blend before its {SUSTAIN_TEXT[sustain[1]]} "
+                f"at {_clock(sustain[2])}.")
+    if o.stack is not None and o.stack[i, j] >= STACK_LIMIT:
+        where = LANDING_TEXT[o.land_what[j]].removeprefix("lands ")
+        return (text + f"; landing {where} at {_clock(float(o.land_at[j]))} would sing both songs' "
+                f"melodies over each other for {o.request(j):.0f} s.")
+    return text + "."
 
 
 def choose_windows(
@@ -849,7 +1155,7 @@ def choose_windows(
     if len(overlap_seconds) != len(tracks) - 1:
         raise ValueError(f"need {len(tracks) - 1} overlaps for {len(tracks)} tracks, got {len(overlap_seconds)}")
     overlaps = [max(0.0, float(o)) for o in overlap_seconds]
-    return _plan(tracks, [[o] for o in overlaps], target_seconds, chroma, None, BLEND_SIZES["auto"])[0]
+    return _plan(tracks, target_seconds, chroma, BLEND_SIZES["auto"], fixed=overlaps)[0]
 
 
 def plan_windows(
@@ -859,11 +1165,14 @@ def plan_windows(
     chroma: Optional[Sequence[Optional[Chroma]]] = None,
     transition_length: TransitionLength = "auto",
 ) -> tuple[list[TrackWindow], list[float]]:
-    """Windows as choose_windows picks them, plus the blend length of every
-    seam, chosen for that pair of songs from blend_lengths: long when their
-    notes line up and neither melody gets in the way, short when they rub or
-    a vocal would overlap. overlap_preference (-1 short to +1 long, from the
-    A/B votes) leans every seam's choice; transition_length ("auto",
+    """Windows as choose_windows picks them, plus the overlap to request at
+    every seam, chosen for that pair of songs: the blend lands on B's next
+    musical event (vocal entry, section, energy lift, phrase) that A can
+    carry a blend into, long when their notes line up and neither melody
+    gets in the way, short when they rub or a vocal would overlap. Tempos
+    too far apart to beat-match get a beatless blend where one side has no
+    beat, else an echo-out. overlap_preference (-1 short to +1 long, from
+    the A/B votes) leans every seam's choice; transition_length ("auto",
     "longer", "extended") is the user's setting from BLEND_SIZES. Render with
     overlap_limits(transition_length) so the renderer allows those lengths.
     """
@@ -872,21 +1181,20 @@ def plan_windows(
     size = BLEND_SIZES[transition_length]
     p = overlap_preference if math.isfinite(overlap_preference) else 0.0
     p = min(1.0, max(-1.0, p))
-    ladders = [blend_lengths(a, b, transition_length) for a, b in zip(tracks, tracks[1:])]
-    return _plan(tracks, ladders, target_seconds, chroma, p + size.lean, size)
+    return _plan(tracks, target_seconds, chroma, size, preference=p + size.lean)
 
 
 def _plan(
     tracks: list[Track],
-    ladders: list[list[float]],
     target_seconds: float | None,
     chroma: Optional[Sequence[Optional[Chroma]]],
-    preference: Optional[float],
     size: BlendSize,
+    preference: float = 0.0,
+    fixed: Optional[list[float]] = None,
 ) -> tuple[list[TrackWindow], list[float]]:
-    """ladders: blend lengths to try per seam, shortest first. preference
-    (overlap_preference plus the setting's lean) None means each ladder is a
-    single fixed length."""
+    """fixed: one given overlap per seam (choose_windows); None = every seam
+    picks its own (plan_windows), leaned by preference (overlap_preference
+    plus the setting's lean)."""
     n = len(tracks)
     cues = [_cues(t) for t in tracks]
     if chroma is not None:
@@ -894,10 +1202,8 @@ def _plan(
             raise ValueError(f"need {n} chroma entries, got {len(chroma)}")
         for c, ch in zip(cues, chroma):
             c.chroma = ch
-    # Middle of each ladder (the top for "extended", so set-mode windows have
-    # room for it): sizes drop builds and set-mode lengths before the blend
-    # lengths are known.
-    typical = [ladder[-1] if size.size_for_longest else ladder[len(ladder) // 2] for ladder in ladders]
+    # Drop builds and set-mode lengths are sized before the blend lengths are known.
+    typical = fixed if fixed is not None else [size.typical] * (n - 1)
     builds = [_build_starts(tracks[i + 1], typical[i]) for i in range(n - 1)]
     for i, starts in enumerate(builds):
         c = cues[i + 1]
@@ -906,28 +1212,33 @@ def _plan(
             have = {round(float(g), 3) for g in c.grid}
             c.drop_only = frozenset(round(s, 3) for s in extra) - have
             c.grid = np.unique(np.concatenate([c.grid, np.round(extra, 3)]))
-    options = [[_score_seam(cues[i], cues[i + 1], o, builds[i]) for o in ladders[i]] for i in range(n - 1)]
-    seams = [_fixed(opts[0]) if preference is None else _choose_length(opts, preference, size.stack_weight)
-             for opts in options]
-    mins = _min_lengths(tracks, [ladder[0] for ladder in ladders])
+    if fixed is not None:
+        seams = [_fixed(_score_seam(cues[i], cues[i + 1], fixed[i], builds[i],
+                                    1.0 if tempos_blend(tracks[i], tracks[i + 1]) else ECHO_BLEND))
+                 for i in range(n - 1)]
+    else:
+        seams = [_seam_choice(cues[i], cues[i + 1], size, preference, builds[i]) for i in range(n - 1)]
+    mins = _min_lengths(tracks, [min(o.request(j) for o in s.options for j in range(len(cues[i + 1].grid)))
+                                 for i, s in enumerate(seams)])
     bests = [best_section(t) for t in tracks]
 
     def fitted(picks: list[tuple[int, int]], i: int) -> tuple[_Seam, bool]:
-        """Seam i's chosen length, or the best one that fits if it won't: the
+        """Seam i's chosen option, or the best one that fits if it won't: the
         renderer caps a blend at half of either window. Also whether it was cut."""
         (s0, e0), (s1, e1) = picks[i], picks[i + 1]
         fit = min(cues[i].grid[e0] - cues[i].grid[s0], cues[i + 1].grid[e1] - cues[i + 1].grid[s1]) / 2
-        seam = seams[i].at(e0, s1)
-        if seam.overlap <= fit or len(seams[i].options) < 2:
+        choice = seams[i]
+        seam = choice.at(e0, s1)
+        if seam.request(s1) <= fit or len(choice.options) < 2:
             return seam, False
-        fitting = [o for o in seams[i].options if o.overlap <= fit]
+        fitting = [k for k, o in enumerate(choice.options) if o.request(s1) <= fit]
         if not fitting:
-            return seams[i].options[0], True
-        return max(fitting, key=lambda o: o.quality[e0, s1]
-                   + float(_length_bonus(o, preference, size.stack_weight)[e0, s1])), True
+            return min(choice.options, key=lambda o: o.request(s1)), True
+        usable = [k for k in fitting if choice.valid[k][e0, s1]] or fitting
+        return choice.options[max(usable, key=lambda k: choice.value(choice.options[k], e0, s1))], True
 
     def blends(picks: list[tuple[int, int]]) -> list[float]:
-        return [fitted(picks, i)[0].overlap for i in range(n - 1)]
+        return [fitted(picks, i)[0].request(picks[i + 1][0]) for i in range(n - 1)]
 
     if target_seconds is None:
         unaries = [_unary(c, i, n, mins[i], None, None) for i, c in enumerate(cues)]
@@ -935,22 +1246,40 @@ def _plan(
     else:
         floors = [max(m, SET_MIN_WINDOW_SECONDS) for m in mins]
         total = target_seconds + sum(typical)
-        candidates = []
-        for _ in range(SET_LENGTH_PASSES):
-            lengths = _length_targets(cues, floors, total)
+        candidates, runs = [], []
+
+        def attempt(lengths: list[float]) -> float:
             unaries = [_unary(c, i, n, mins[i], lengths[i], bests[i], typical[i - 1] if i else 0.0)
                        for i, c in enumerate(cues)]
             picks, score = _solve(cues, seams, unaries)
             want = target_seconds + sum(blends(picks))
             got = sum(cues[i].grid[e] - cues[i].grid[s] for i, (s, e) in enumerate(picks))
             candidates.append((abs(got - want) > SET_TOLERANCE * target_seconds, abs(got - want), -score, picks))
-            if abs(got - want) <= SET_TOLERANCE * target_seconds * 0.5:
+            runs.append((got - want, picks))
+            return want - got
+
+        for _ in range(SET_LENGTH_PASSES):
+            miss = attempt(_length_targets(cues, floors, total))
+            if abs(miss) <= SET_TOLERANCE * target_seconds * 0.5:
                 break
-            total += want - got
+            total += miss
+        else:
+            # Every window moving by a whole phrase at once can step over the
+            # target: mix the closest passes either side of it, track by track.
+            over = min((r for r in runs if r[0] > 0), key=lambda r: r[0], default=None)
+            under = max((r for r in runs if r[0] < 0), key=lambda r: r[0], default=None)
+            if over is not None and under is not None:
+                short = [cues[i].grid[e] - cues[i].grid[s] for i, (s, e) in enumerate(under[1])]
+                long = [cues[i].grid[e] - cues[i].grid[s] for i, (s, e) in enumerate(over[1])]
+                lengths, need = list(short), -under[0]
+                for i in sorted(range(n), key=lambda i: long[i] - short[i]):
+                    if 0 < long[i] - short[i] <= 2 * need:
+                        lengths[i], need = long[i], need - (long[i] - short[i])
+                attempt(lengths)
         picks = min(candidates, key=lambda c: c[:3])[3]
 
     chosen, capped = map(list, zip(*[fitted(picks, i) for i in range(n - 1)])) if n > 1 else ([], [])
-    overlaps = [s.overlap for s in chosen]
+    overlaps = [chosen[i].request(picks[i + 1][0]) for i in range(n - 1)]
 
     windows = []
     for i, (si, ei) in enumerate(picks):
@@ -985,15 +1314,17 @@ def _plan(
                 parts.append(f"Plays inside its loudest part ({_clock(b0)}-{_clock(b1)}).")
         if c.duration < mins[i]:
             parts.append("Too short to trim, so it plays in full.")
-        if drop_out and preference is not None and not tempos_blend(c.track, cues[i + 1].track):
-            parts.append(f"Its tempo is too far from {next_name}'s to beat-match, so this is a quick "
-                         f"cut at any transition length.")
+        if drop_out and fixed is None and not tempos_blend(c.track, cues[i + 1].track):
+            parts.append(f"Its tempo is too far from {next_name}'s to beat-match, and {next_name}'s drop "
+                         f"beat an echo-out or a beatless blend here, so it cuts into the drop.")
         if tail is not None and not drop_out:
             ej, next_end = picks[i + 1]
             nxt = cues[i + 1]
             clash = _renderer_echoes(c, s, e, nxt, float(nxt.grid[ej]), float(nxt.grid[next_end]))
-            fix = ("the vocals swap on a beat" if tempos_blend(c.track, nxt.track)
-                   else "the renderer echoes it out")
+            echoes = tail.kind == "echo" or (
+                tail.kind == "fixed" and not tempos_blend(c.track, nxt.track)
+                and not _renderer_beatless(c, ei, nxt, ej, tail.request(ej)))
+            fix = "the renderer echoes it out" if echoes else "the vocals swap on a beat"
             if tail.quality[ei, ej] < POOR_SEAM or tail.handoff[ei, ej] < POOR_HANDOFF:
                 why = ("both songs carry melody at every cue" if tail.handoff[ei, ej] < NEUTRAL
                        else "their energy never lines up")
@@ -1013,13 +1344,12 @@ def _plan(
             if tail.gap[ei, ej] > GAP_OK_SECONDS:
                 parts.append(f"About {tail.gap[ei, ej]:.0f} s pass without melody from either song "
                              f"around the blend into {next_name}.")
-            if tail.groove[ei, ej] < SPARSE_GROOVE:
+            if tail.groove[ei, ej] < SPARSE_GROOVE and tail.kind != "echo":
                 parts.append(f"The blend into {next_name} is on the sparse side; no fuller cue "
                              f"handed the melody over as cleanly.")
-            if preference is not None:
-                text = _length_text(c, nxt, tail, seams[i].options, ei, ej, capped[i])
-                if text:
-                    parts.append(text)
+            text = _length_text(c, nxt, tail, seams[i], ei, ej, capped[i], size.cap)
+            if text:
+                parts.append(text)
         windows.append(TrackWindow(track_id=c.track.id, start_seconds=round(s, 3),
                                    end_seconds=round(e, 3), reason=" ".join(parts),
                                    drop_seconds=drop_seconds))
@@ -1028,7 +1358,7 @@ def _plan(
         played = sum(w.end_seconds - w.start_seconds for w in windows) - sum(overlaps)
         if abs(played - target_seconds) > SET_TOLERANCE * target_seconds:
             why = ("the songs are too short to fill it" if played < target_seconds
-                   else "each song needs room for the extended blends" if size.size_for_longest
+                   else "each song needs room for the longer blends" if size.typical > MAX_BLEND_SECONDS / 2
                    else f"every song needs at least {SET_MIN_WINDOW_SECONDS:.0f} s")
             first = windows[0]
             windows[0] = first.model_copy(update={"reason": (

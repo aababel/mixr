@@ -28,10 +28,24 @@ class Played:
     window: TrackWindow  # the window actually used (clamped to the audio)
     trimmed_start: bool
     trimmed_end: bool
+    pulse: list[float] | None = None  # window-relative kick pulse (seam_plan.pulse_curve), on pulse_hop
+    pulse_hop: float | None = None
 
 
 FADE_OUT_KEY = "fade_out_seconds"  # track.metadata keys written by analysis.py
 FADE_IN_KEY = "fade_in_seconds"
+PULSE_KEY = "pulse"
+PULSE_HOP_KEY = "pulse_hop_seconds"
+
+
+def stored_pulse(track: Track) -> tuple[list[float] | None, float | None]:
+    """(kick pulse curve, its hop) from analysis, (None, None) if absent or unusable."""
+    curve, hop = track.metadata.get(PULSE_KEY), track.metadata.get(PULSE_HOP_KEY)
+    if not isinstance(curve, list) or not curve or isinstance(hop, bool) or not isinstance(hop, (int, float)):
+        return None, None
+    if not np.isfinite(hop) or hop <= 0:
+        return None, None
+    return [float(v) for v in curve], float(hop)
 
 
 def stored_fade(track: Track, key: str) -> float | None:
@@ -82,9 +96,10 @@ def play(audio: np.ndarray, track: Track, window: TrackWindow | None, sr: int) -
     """Cut `audio` (the whole decoded track) to `window` (None = all of it)."""
     n = audio.shape[0]
     melody = list(track.melody_activity) or None
+    pulse, pulse_hop = stored_pulse(track)
     if window is None:
         w = TrackWindow(track_id=track.id, start_seconds=0.0, end_seconds=n / sr)
-        return Played(audio, list(track.beats_seconds), melody, w, False, False)
+        return Played(audio, list(track.beats_seconds), melody, w, False, False, pulse, pulse_hop)
 
     s = min(max(0, int(round(window.start_seconds * sr))), n - 1)
     e = min(n, int(round(window.end_seconds * sr)))
@@ -95,11 +110,13 @@ def play(audio: np.ndarray, track: Track, window: TrackWindow | None, sr: int) -
     hop = track.energy_hop_seconds
     if melody and hop:
         melody = melody[int(start / hop):int(np.ceil(end / hop))] or None
+    if pulse:
+        pulse = pulse[int(round(start / pulse_hop)):int(np.ceil(end / pulse_hop))] or None
     used = window.model_copy(update={"start_seconds": start, "end_seconds": end})
     # a window within EDGE_TOLERANCE_SECONDS of the track's edge plays to that edge
     # (the track's listed duration and its decoded length can differ by a few ms)
     tol = int(EDGE_TOLERANCE_SECONDS * sr)
-    return Played(audio[s:e], beats, melody, used, s > tol, e < n - tol)
+    return Played(audio[s:e], beats, melody, used, s > tol, e < n - tol, pulse, pulse_hop)
 
 
 def edge_fades(p: Played, track: Track, sr: int, first: bool, last: bool) -> tuple[np.ndarray, list[str]]:
