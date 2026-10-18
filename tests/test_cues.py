@@ -224,3 +224,81 @@ def test_bad_windows_are_rejected():
         check_windows(tracks, [ok, TrackWindow(track_id="x", start_seconds=0, end_seconds=10)])
     with pytest.raises(ValueError):
         check_windows(tracks, [ok, TrackWindow(track_id="b", start_seconds=5, end_seconds=6)])
+
+
+# ---------------------------------------------------------------- section labels
+
+def pop_song(sr=22050, bpm=120.0):
+    """intro (drums) / verse (soft melody) / chorus (loud melody + chords) x2 /
+    break (pad) / chorus / outro. Returns audio and [(name, start, end)]."""
+    plan = (("intro", 16), ("verse", 16), ("chorus", 16), ("verse", 16), ("chorus", 16),
+            ("break", 8), ("chorus", 16), ("outro", 8))
+    p = 60.0 / bpm
+    k = np.arange(int(0.12 * sr)) / sr
+    kick = np.sin(2 * np.pi * 60 * k) * np.exp(-k * 25)
+    tc = np.arange(400) / sr
+    click = np.sin(2 * np.pi * 2000 * tc) * np.exp(-tc * 80)
+    level = {"intro": 0.5, "verse": 0.6, "chorus": 1.0, "break": 0.0, "outro": 0.4}
+    segs, marks, t0 = [], [], 0.0
+    for name, bars in plan:
+        dur = bars * 4 * p
+        n = int(round(dur * sr))
+        y, t = np.zeros(n), np.arange(n) / sr
+        for j, b in enumerate(np.arange(0, dur - 1e-6, p)):
+            i = int(b * sr)
+            y[i:i + kick.size] += kick[:n - i] * level[name] * (1.0 if j % 4 == 0 else 0.7)
+            y[i:i + click.size] += click[:n - i] * 0.3 * level[name]
+        if name == "verse":
+            for j, b in enumerate(np.arange(0, dur, p)):
+                i, m = int(b * sr), int(p * sr)
+                seg = np.arange(min(m, n - i)) / sr
+                y[i:i + seg.size] += 0.12 * np.sin(2 * np.pi * [330, 392, 440, 392][j % 4] * seg)
+        if name == "chorus":
+            notes = [523, 587, 659, 784, 659, 587, 523, 494]
+            for j, b in enumerate(np.arange(0, dur, p / 2)):
+                i, m = int(b * sr), int(p / 2 * sr)
+                seg = np.arange(min(m, n - i)) / sr
+                y[i:i + seg.size] += 0.22 * np.sin(2 * np.pi * notes[j % 8] * seg)
+            y += 0.08 * sum(np.sin(2 * np.pi * f * t) for f in (262, 330, 392))
+        if name == "break":
+            y += 0.05 * (np.sin(2 * np.pi * 220 * t) + np.sin(2 * np.pi * 277 * t))
+        segs.append(y)
+        marks.append((name, t0, t0 + dur))
+        t0 += dur
+    return np.concatenate(segs).astype(np.float32), marks
+
+
+def test_sections_are_fine_grained_and_label_choruses(tmp_path):
+    y, marks = pop_song()
+    p = tmp_path / "pop.wav"
+    sf.write(p, y, 22050)
+    dur = len(y) / 22050
+    tr = analyze_track(p, Track(id="pop", filename="pop.wav", duration_seconds=dur, sample_rate=22050))
+    secs = tr.sections
+    phrase = 8 * 4 * 0.5
+    # contiguous, whole track, and no section longer than 16 bars (plus the lead-in before the first phrase)
+    assert secs[0].start_seconds == 0.0 and secs[-1].end_seconds == pytest.approx(dur, abs=0.01)
+    assert all(a.end_seconds == b.start_seconds for a, b in zip(secs, secs[1:]))
+    lead_in = tr.phrase_starts_seconds[0]
+    assert all(s.end_seconds - s.start_seconds <= 2 * phrase + 1.0 + (lead_in if i == 0 else 0)
+               for i, s in enumerate(secs))
+
+    def label_at(t):
+        return next(s.label for s in secs if s.start_seconds <= t < s.end_seconds)
+
+    choruses = [(a, b) for n, a, b in marks if n == "chorus"]
+    assert sum(label_at((a + b) / 2) == "chorus" for a, b in choruses) >= 2
+    assert label_at(8.0) == "intro"
+    assert label_at(168.0) == "break"
+    verses = [(a, b) for n, a, b in marks if n == "verse"]
+    assert all(label_at((a + b) / 2) not in ("chorus", "drop") for a, b in verses)
+
+
+def test_flat_song_gets_no_chorus_or_drop(tmp_path):
+    y, _, _ = drums_then_melody(intro_bars=0, melody_bars=64)
+    p = tmp_path / "flat.wav"
+    sf.write(p, y, 22050)
+    tr = analyze_track(p, Track(id="f", filename="flat.wav", duration_seconds=len(y) / 22050,
+                                sample_rate=22050))
+    assert len(tr.sections) >= 3  # 64 bars can't be one section any more
+    assert not any(s.label in ("chorus", "drop") for s in tr.sections)
