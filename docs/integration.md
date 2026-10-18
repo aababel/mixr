@@ -197,8 +197,10 @@ def recommended_overlap_seconds(overlap_preference: float) -> float:
 ```
 
 `POST /api/calibration/vote` calls `update_preference`. `POST /api/mix`
-calls `recommended_overlap_seconds` once per seam, with p = 0.0 when the
-user skipped calibration.
+passes the preference to `windows.plan_windows` (p = 0.0 when the user
+skipped calibration), which picks every seam's blend length for its own pair
+of songs and leans each choice by p. `recommended_overlap_seconds` is no
+longer used by the routes.
 
 ## Musical cue points and DJ set mode
 
@@ -337,7 +339,42 @@ def choose_windows(
     target_seconds: float | None = None,  # None = full mode (keep songs as long as possible)
 ) -> list[TrackWindow]:
     """One window per track, same order. reason says why each cue was picked."""
+
+def plan_windows(
+    tracks: list[Track],
+    overlap_preference: float = 0.0,      # -1 short .. +1 long, from the A/B votes
+    target_seconds: float | None = None,
+    chroma: list[Chroma | None] | None = None,
+    transition_length: Literal["auto", "longer", "extended"] = "auto",
+) -> tuple[list[TrackWindow], list[float]]:
+    """Windows plus a blend length per seam, chosen for each pair of songs."""
 ```
+
+**Blend length per pair** (`plan_windows`, what the routes use): each seam
+is scored at whole phrases of 16, 32 and 64 beats of the outgoing song's
+tempo (`blend_lengths`, kept within 4-32 s; 4/8/16/24 s without a tempo; one
+4 s blend when the tempos are too far apart to beat-match). Melody handoff,
+groove, payoff and harmony are measured over each length, and a longer blend
+earns `0.1 x reach x (0.5 + 2 x (harmony - 0.5) - stack + p)`, where reach
+runs 0 at 4 s to 1 at 32 s and stack is how much melody both songs carry over
+the blend (plus 0.5 where the vocals would have to swap). So songs in key
+with a clean handoff ride together for 32-64 beats, songs whose melodies
+collide hand over in 16, and the votes lean every seam without overriding
+the songs. A chosen length that won't fit in half of either window drops to
+the longest one that does. Each reason ends with the length and why
+("Long blend into X (64 beats, 29 s): their notes line up.").
+
+**Transition length setting** (`transition_length`, `windows.BLEND_SIZES`):
+`"auto"` (default) is exactly the above. `"longer"` adds 1.0 to p and raises
+the cap to 40 s, so 64-beat blends fit at 96+ BPM. `"extended"` adds 1.5 to
+p, tries 16/32/64/128 beats up to 60 s, halves the stack penalty (vocal
+clashes still shorten a blend, just less) and budgets set-mode windows for
+the longest length. Tempos that can't be beat-matched still get the 4 s
+blend, and the fit-in-half-a-window rule still applies; in set mode the
+target length wins, so a short set caps its blends to fit. Render with
+`overlap_limits(transition_length)`, which raises only
+`SafetyLimits.max_overlap_seconds`; the default stays 32 s. The A/B trial
+compares 8/24 s (auto), 12/36 s (longer) or 24/56 s (extended).
 
 Every window starts and ends on a phrase start (or a beat when there are no
 phrases) and never exceeds the track. For each seam, score candidate
@@ -429,15 +466,19 @@ How the implementation decides (constants at the top of the module):
 
 - `POST /api/mix` and `POST /api/calibration/preview` accept
   `mode: "full" | "set"` (default `"full"`) and `target_seconds` (set mode
-  only, 120-1200, default 90 s per track). The route always calls
-  `choose_windows` (with `target_seconds=None` in full mode) using the same
-  overlaps it passes to `render_mix`.
-- UI: a "Full songs / DJ set" toggle with a set-length picker on the
-  running-order screen. The timeline shows only the played part of each song,
+  only, 120-1200, default 90 s per track) and `transition_length:
+  "auto" | "longer" | "extended"` (default `"auto"`). The route always calls
+  `plan_windows` (with `target_seconds=None` in full mode) and passes the
+  blend lengths it returns to `render_mix`, one per seam.
+- UI: a "Full songs / DJ set" toggle with a set-length picker and an
+  "Auto / Longer / Extended" transition-length picker on the running-order
+  screen; the setting flows into both the A/B previews and the final mix,
+  and a blend over 32 s reads "extended blend" on its card. The timeline shows only the played part of each song,
   and the tracklist shows which part was used (e.g. "1:12-2:45").
-- Preview cue points use the neutral overlap (`recommended_overlap_seconds(0)`),
-  since the preference isn't known yet; the mix uses its own overlap, so a
-  strongly "long blends" preference can shift a cue slightly.
+- Preview cue points use the neutral preference (`plan_windows(p=0)`),
+  since the votes aren't in yet; the A/B trial itself still compares the
+  fixed short and long overlaps. The mix plans with the voted preference, so
+  a strong lean can shift a cue slightly.
 
 ## HTTP API (Shaan)
 
@@ -448,10 +489,10 @@ How the implementation decides (constants at the top of the module):
 | `GET /api/tracks/{id}/audio` | | audio file |
 | `POST /api/analyze` | `{track_ids}` | `{tracks}` |
 | `POST /api/order` | `{track_ids, keep_order?}` | `{ordered_track_ids, suggested_track_ids, scores, explanation}` |
-| `POST /api/calibration/preview` | `{ordered_track_ids, trial, mode?, target_seconds?}` | `{trial_id, from_id, to_id, a, b}`, each `{audio_url}` |
+| `POST /api/calibration/preview` | `{ordered_track_ids, trial, mode?, target_seconds?, transition_length?}` | `{trial_id, from_id, to_id, a, b}`, each `{audio_url}` |
 | `GET /api/calibration/previews/{trial_id}/{a\|b}` | | preview WAV |
 | `POST /api/calibration/vote` | `{trial_id, chosen, preference}` | `{preference, chosen_overlap_seconds, other_overlap_seconds, chose_longer}` |
-| `POST /api/mix` | `{ordered_track_ids, overlap_preference, calibrated, mode?, target_seconds?}` | `{mix_id, audio_url, manifest}` |
+| `POST /api/mix` | `{ordered_track_ids, overlap_preference, calibrated, mode?, target_seconds?, transition_length?}` | `{mix_id, audio_url, manifest}` |
 | `GET /api/mixes/{id}` | | `{mix_id, audio_url, manifest}` |
 | `GET /api/mixes/{id}/audio` | | mix WAV |
 

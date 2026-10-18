@@ -29,15 +29,16 @@ from backend.audio.analysis import analyze_track
 from backend.audio.harmony import chroma_for
 from backend.audio.mix import render_mix
 from backend.audio.preview import render_preview
-from backend.logic.calibration import (
-    calibration_overlaps,
-    recommended_overlap_seconds,
-    update_preference,
-)
+from backend.logic.calibration import calibration_overlaps, update_preference
 from backend.logic.explain import OrderExplanation, explain_order, explain_user_order
 from backend.logic.ordering import order_tracks
 from backend.logic.scoring import score_pairs
-from backend.logic.windows import DEFAULT_SET_SECONDS_PER_TRACK, choose_windows
+from backend.logic.windows import (
+    DEFAULT_SET_SECONDS_PER_TRACK,
+    TransitionLength,
+    overlap_limits,
+    plan_windows,
+)
 
 router = APIRouter()
 
@@ -106,6 +107,9 @@ class MixModeOptions(BaseModel):
     mode: Literal["full", "set"] = "full"
     # Set mode only; defaults to DEFAULT_SET_SECONDS_PER_TRACK per song.
     target_seconds: Optional[float] = Field(None, ge=MIN_SET_SECONDS, le=MAX_SET_SECONDS)
+    # Blend lengths: "auto" lets each pair of songs decide, "longer" leans every
+    # seam long, "extended" allows blends up to 60 s (windows.BLEND_SIZES).
+    transition_length: TransitionLength = "auto"
 
 
 class MixRequest(MixModeOptions):
@@ -268,17 +272,18 @@ def order(request: OrderRequest):
     )
 
 
-def _choose_windows(
-    tracks: list[Track], overlaps: list[float], options: MixModeOptions
-) -> list[TrackWindow]:
-    """Cue points for every song, in both modes (full mode = no target length)."""
+def _plan_windows(
+    tracks: list[Track], overlap_preference: float, options: MixModeOptions
+) -> tuple[list[TrackWindow], list[float]]:
+    """Cue points for every song and a blend length for every seam, picked per
+    pair of songs, in both modes (full mode = no target length)."""
     target = None
     if options.mode == "set":
         target = options.target_seconds or DEFAULT_SET_SECONDS_PER_TRACK * len(tracks)
         target = min(MAX_SET_SECONDS, max(MIN_SET_SECONDS, target))
     try:
         chroma = [chroma_for(get_track_path(t.id)) for t in tracks]
-        return choose_windows(tracks, overlaps, target, chroma)
+        return plan_windows(tracks, overlap_preference, target, chroma, options.transition_length)
     except Exception as e:
         raise HTTPException(500, f"Choosing cue points failed: {e}")
 
@@ -288,11 +293,12 @@ def _render_trial(
     incoming: Track,
     outgoing_window: TrackWindow | None = None,
     incoming_window: TrackWindow | None = None,
+    transition_length: TransitionLength = "auto",
 ) -> Trial:
     trial_id = uuid.uuid4().hex[:12]
     previews_dir = storage_dir() / "previews"
     previews_dir.mkdir(exist_ok=True)
-    short, long = calibration_overlaps()
+    short, long = calibration_overlaps(transition_length)
     a_seconds, b_seconds = (short, long) if random.random() < 0.5 else (long, short)
     applied, paths = {}, {}
     for variant, seconds in (("A", a_seconds), ("B", b_seconds)):
@@ -308,6 +314,7 @@ def _render_trial(
             paths[variant],
             outgoing_window=outgoing_window,
             incoming_window=incoming_window,
+            safety=overlap_limits(transition_length),
         )
     # Votes record what was actually heard, so a clamped pair can't fake a preference.
     vote = Vote(
@@ -327,10 +334,9 @@ def _audible_gap(trial: Trial) -> float:
 @router.post("/calibration/preview", response_model=PreviewResponse)
 def calibration_preview(request: PreviewRequest):
     tracks = _distinct_tracks(request.ordered_track_ids, 2)
-    # The preference isn't known yet, so cue points use the neutral overlap:
-    # the windows the mix will play unless the votes lengthen its blends.
-    overlap = recommended_overlap_seconds(0.0)
-    windows = _choose_windows(tracks, [overlap] * (len(tracks) - 1), request)
+    # The preference isn't known yet, so cue points use the neutral one: the
+    # windows the mix will play unless the votes lean its blends.
+    windows, _ = _plan_windows(tracks, 0.0, request)
     excluded = set(request.exclude_pairs)
     seams = list(zip(tracks, tracks[1:], windows, windows[1:]))
     start = request.trial % len(seams)
@@ -338,7 +344,7 @@ def calibration_preview(request: PreviewRequest):
         if (outgoing.id, incoming.id) in excluded:
             continue
         try:
-            trial = _render_trial(outgoing, incoming, out_window, in_window)
+            trial = _render_trial(outgoing, incoming, out_window, in_window, request.transition_length)
         except Exception as e:
             raise HTTPException(500, f"Preview failed: {e}")
         if _audible_gap(trial) >= MIN_AUDIBLE_OVERLAP_GAP_SECONDS:
@@ -396,8 +402,7 @@ def calibration_vote(request: VoteRequest):
 @router.post("/mix", response_model=MixResponse)
 def mix(request: MixRequest):
     tracks = _distinct_tracks(request.ordered_track_ids, 2)
-    overlaps = [recommended_overlap_seconds(request.overlap_preference)] * (len(tracks) - 1)
-    windows = _choose_windows(tracks, overlaps, request)
+    windows, overlaps = _plan_windows(tracks, request.overlap_preference, request)
 
     mix_id = uuid.uuid4().hex[:12]
     mixes_dir = storage_dir() / "mixes"
@@ -414,6 +419,7 @@ def mix(request: MixRequest):
             overlap_preference=request.overlap_preference,
             windows=windows,
             mode=request.mode,
+            safety=overlap_limits(request.transition_length),
         )
     except Exception as e:
         out_path.unlink(missing_ok=True)

@@ -39,7 +39,13 @@ from backend.api.schemas import (
 from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.loudness import DEFAULT_LOUDNESS, TrackGain, gain_notes, track_gain_for_path
 from backend.audio.stretch import rubberband_available
-from backend.audio.transition import gain_factor, render_transition, seam_sample_bounds
+from backend.audio.transition import (
+    DEFAULT_SAFETY,
+    SafetyLimits,
+    gain_factor,
+    render_transition,
+    seam_sample_bounds,
+)
 from backend.audio.windows import check_windows, edge_fades, play, with_entry
 
 _CHUNK = RENDER_SR * 10  # scale and write long track bodies 10 s at a time
@@ -71,6 +77,7 @@ def render_mix(
     loudness_match: bool = True,
     windows: list[TrackWindow] | None = None,
     mode: MixMode | None = None,
+    safety: SafetyLimits = DEFAULT_SAFETY,
 ) -> MixManifest:
     """Write the full mix to out_path (WAV). The manifest reports actual values.
 
@@ -78,6 +85,8 @@ def render_mix(
     Each transition's applied_gain_db records the gains actually used.
     windows: one per track, same order (None = every track whole, as before).
     mode: recorded in the manifest; defaults to "set" with windows, else "full".
+    safety: limits for every seam (a longer max_overlap_seconds allows
+    extended blends).
     """
     if len(tracks) < 1 or len(tracks) != len(paths):
         raise ValueError("tracks and paths must be non-empty and the same length")
@@ -138,6 +147,7 @@ def render_mix(
                 current, nxt, RENDER_SR,
                 cur_p.beats, nxt_p.beats,
                 request, "final",
+                safety=safety,
                 outgoing_gain_db=db(i), incoming_gain_db=db(i + 1),
                 outgoing_melody=cur_p.melody, incoming_melody=nxt_p.melody,
                 melody_hop_seconds=track.energy_hop_seconds,

@@ -13,10 +13,16 @@ from backend.logic.windows import (
     SET_TOLERANCE,
     TIME_GRID_SECONDS,
     WEIGHTS,
+    BLEND_FALLBACK_SECONDS,
+    BLEND_SIZES,
+    MAX_BLEND_SECONDS,
+    UNMATCHED_BLEND_SECONDS,
     _cues,
     best_section,
+    blend_lengths,
     choose_windows,
     find_drops,
+    plan_windows,
 )
 
 HOP = 0.5
@@ -422,3 +428,127 @@ def test_stored_fade_moves_where_the_seam_is_judged():
     a.metadata = {FADE_OUT_KEY: 0.0}
     wa, _ = choose_windows([a, b], [12.0])
     assert _flags_clash(wa.reason)
+
+
+def _clean_pair():
+    """A's melody stops 42 s before its end, B's starts 40 s in: room for a long blend."""
+    return (make_track("ca", melody=[(0, 150, 0.8), (150, 192, 0.05)]),
+            make_track("cb", melody=[(0, 40, 0.05), (40, 192, 0.8)]))
+
+
+def _clashing_pair():
+    """Both sing right up to the seam: any long blend stacks the two vocals."""
+    return (make_track("xa", melody=[(0, 186, 0.9), (186, 192, 0.1)]),
+            make_track("xb", melody=[(0, 6, 0.1), (6, 192, 0.9)]))
+
+
+def test_blend_lengths_are_whole_phrases_of_the_outgoing_beat():
+    a, b = make_track("a"), make_track("b")
+    assert blend_lengths(a, b) == [8.0, 16.0, 32.0]  # 16, 32, 64 beats at 120 BPM
+    a.bpm = b.bpm = 90.0
+    assert blend_lengths(a, b) == pytest.approx([32 / 3, 64 / 3])  # 64 beats would pass 32 s
+    a.bpm, b.bpm = 120.0, 90.0
+    assert blend_lengths(a, b) == [UNMATCHED_BLEND_SECONDS]  # too far apart to beat-match
+    a.bpm = b.bpm = None
+    assert blend_lengths(a, b) == list(BLEND_FALLBACK_SECONDS)
+
+
+def test_each_seam_gets_a_blend_length_for_its_own_songs():
+    ca, cb = _clean_pair()
+    xa, xb = _clashing_pair()
+    windows, overlaps = plan_windows([ca, cb, xa, xb])
+    assert overlaps[0] == 32.0  # clean handoff: the longest phrase
+    assert overlaps[1] == overlaps[2] == 8.0  # cb and xa, xa and xb sing over each other
+    assert "Long blend into cb (64 beats, 32 s)" in windows[0].reason
+    assert "Short blend into xb (16 beats, 8 s)" in windows[2].reason
+    check_windows([ca, cb, xa, xb], windows)
+
+
+def test_preference_leans_blend_lengths_without_overriding_the_songs():
+    ca, cb = _clean_pair()
+    xa, xb = _clashing_pair()
+    clean = [plan_windows([ca, cb], p)[1][0] for p in (-1.0, 0.0, 1.0)]
+    assert clean == sorted(clean) and clean[0] < clean[-1]
+    assert plan_windows([xa, xb], 1.0)[1] == [8.0]  # even a long preference keeps a vocal clash short
+
+
+def test_blend_fits_inside_short_windows():
+    a, b = make_track("a", duration=40.0), make_track("b", duration=40.0)
+    windows, overlaps = plan_windows([a, b], 1.0)
+    shortest = min(lengths(windows))
+    assert overlaps[0] <= shortest / 2
+    assert "fits these windows" in windows[0].reason
+
+
+def test_unmatched_tempos_get_one_short_blend():
+    a, b = make_track("a"), make_track("b")
+    b.bpm = 90.0
+    windows, overlaps = plan_windows([a, b])
+    assert overlaps == [UNMATCHED_BLEND_SECONDS]
+    assert "tempos are too far apart" in windows[0].reason
+
+
+def test_set_mode_counts_the_chosen_blends_toward_the_target():
+    ca, cb = _clean_pair()
+    xa, xb = _clashing_pair()
+    tracks = [ca, cb, xa, xb]
+    windows, overlaps = plan_windows(tracks, 0.0, 300.0)
+    assert abs(played(windows, overlaps) - 300.0) <= SET_TOLERANCE * 300.0
+
+
+def _at_bpm(track, bpm):
+    track.bpm = bpm
+    track.beats_seconds = list(np.arange(0.0, track.duration_seconds, 60.0 / bpm))
+    return track
+
+
+def test_transition_length_sets_the_blend_ladder():
+    a, b = make_track("a"), make_track("b")
+    # 120 BPM: 128 beats is 64 s, past even Extended's cap.
+    assert blend_lengths(a, b, "auto") == [8.0, 16.0, 32.0]
+    assert blend_lengths(a, b, "extended") == [8.0, 16.0, 32.0]
+    _at_bpm(a, 100.0), _at_bpm(b, 100.0)
+    assert blend_lengths(a, b, "auto") == pytest.approx([9.6, 19.2])
+    assert blend_lengths(a, b, "longer") == pytest.approx([9.6, 19.2, 38.4])  # 64 beats fits 40 s
+    _at_bpm(a, 132.0), _at_bpm(b, 132.0)
+    assert blend_lengths(a, b, "extended")[-1] == pytest.approx(128 * 60 / 132)
+    for setting in BLEND_SIZES:
+        assert max(blend_lengths(a, b, setting)) <= BLEND_SIZES[setting].cap
+        b.bpm = 90.0
+        assert blend_lengths(a, b, setting) == [UNMATCHED_BLEND_SECONDS]  # safety still wins
+        b.bpm = 132.0
+    a.bpm = b.bpm = None
+    assert blend_lengths(a, b, "extended") == list(BLEND_SIZES["extended"].fallback)
+
+
+def test_extended_reaches_past_32_s_only_where_the_songs_allow():
+    ca = _at_bpm(make_track("ca", 240.0, melody=[(0, 170, 0.8), (170, 240, 0.05)]), 132.0)
+    cb = _at_bpm(make_track("cb", 240.0, melody=[(0, 70, 0.05), (70, 240, 0.8)]), 132.0)
+    xa = _at_bpm(make_track("xa", 240.0, melody=[(0, 234, 0.9), (234, 240, 0.1)]), 132.0)
+    xb = _at_bpm(make_track("xb", 240.0, melody=[(0, 6, 0.1), (6, 240, 0.9)]), 132.0)
+
+    auto = plan_windows([ca, cb])[1][0]
+    windows, overlaps = plan_windows([ca, cb], transition_length="extended")
+    assert auto <= MAX_BLEND_SECONDS < overlaps[0]
+    assert "Extended blend into cb (128 beats, 58 s)" in windows[0].reason
+    check_windows([ca, cb], windows)
+
+    # A vocal clash still keeps the blend well short of the cap.
+    assert plan_windows([xa, xb], transition_length="extended")[1][0] < MAX_BLEND_SECONDS
+
+
+def test_extended_blends_shrink_to_fit_their_windows():
+    a = _at_bpm(make_track("a", 80.0, melody=[(0, 30, 0.8), (30, 80, 0.05)]), 132.0)
+    b = _at_bpm(make_track("b", 80.0, melody=[(0, 50, 0.05), (50, 80, 0.8)]), 132.0)
+    windows, overlaps = plan_windows([a, b], transition_length="extended")
+    assert overlaps[0] <= min(lengths(windows)) / 2
+    assert "fits these windows" in windows[0].reason
+
+
+def test_extended_set_mode_still_hits_the_target():
+    ca, cb = _clean_pair()
+    xa, xb = _clashing_pair()
+    tracks = [_at_bpm(t, 132.0) for t in (ca, cb, xa, xb)]
+    windows, overlaps = plan_windows(tracks, 0.0, 300.0, transition_length="extended")
+    assert abs(played(windows, overlaps) - 300.0) <= SET_TOLERANCE * 300.0
+    assert all(o <= min(lengths(windows[i:i + 2])) / 2 for i, o in enumerate(overlaps))

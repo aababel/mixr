@@ -5,6 +5,8 @@ import pytest
 import soundfile as sf
 from fastapi.testclient import TestClient
 
+from backend.api.schemas import Track
+from backend.logic.windows import blend_lengths
 from backend.main import app
 
 
@@ -281,6 +283,11 @@ def test_full_pipeline(client):
     assert manifest["calibrated"] is True
     assert manifest["overlap_preference"] == 0.5
     assert len(manifest["transitions"]) == 2
+    # Each seam asks for a blend length picked for its own pair of songs.
+    tracks = {i: Track(**client.get(f"/api/tracks/{i}").json()) for i in ordered}
+    for t in manifest["transitions"]:
+        ladder = blend_lengths(tracks[t["from_id"]], tracks[t["to_id"]])
+        assert any(t["requested_overlap_seconds"] == pytest.approx(o) for o in ladder)
     # Full mode: tones have no melody to hand over, so every song plays whole.
     assert manifest["mode"] == "full"
     assert [(w["track_id"], w["start_seconds"], w["end_seconds"]) for w in manifest["windows"]] == [
@@ -298,6 +305,62 @@ def test_full_pipeline(client):
     consumed = sum((40.0 - t["outgoing_start_seconds"]) + t["actual_overlap_seconds"] for t in ts)
     seams = sum(t["output_duration_seconds"] for t in ts)
     assert duration == pytest.approx(3 * 40.0 - consumed + seams, abs=0.1)
+
+
+def test_mix_and_preview_accept_a_transition_length(client):
+    ids = client.post("/api/tracks", files=song_files(seconds=100.0)).json()["track_ids"]
+    client.post("/api/analyze", json={"track_ids": ids})
+    body = {"ordered_track_ids": ids, "transition_length": "extended"}
+    res = client.post("/api/mix", json=body)
+    assert res.status_code == 200, res.text
+    tracks = {i: Track(**client.get(f"/api/tracks/{i}").json()) for i in ids}
+    for t in res.json()["manifest"]["transitions"]:
+        ladder = blend_lengths(tracks[t["from_id"]], tracks[t["to_id"]], "extended")
+        assert any(t["requested_overlap_seconds"] == pytest.approx(o) for o in ladder)
+    assert client.post("/api/calibration/preview", json=body).status_code == 200
+    bad = {"ordered_track_ids": ids, "transition_length": "huge"}
+    assert client.post("/api/mix", json=bad).status_code == 422
+    assert client.post("/api/calibration/preview", json=bad).status_code == 422
+
+
+def test_mix_and_preview_accept_a_transition_length(client):
+    ids = client.post("/api/tracks", files=song_files(seconds=100.0)).json()["track_ids"]
+    client.post("/api/analyze", json={"track_ids": ids})
+    body = {"ordered_track_ids": ids[:2], "transition_length": "extended"}
+    res = client.post("/api/mix", json=body)
+    assert res.status_code == 200, res.text
+    t = res.json()["manifest"]["transitions"][0]
+    tracks = [Track(**client.get(f"/api/tracks/{i}").json()) for i in ids[:2]]
+    ladder = blend_lengths(*tracks, "extended")
+    assert any(t["requested_overlap_seconds"] == pytest.approx(o) for o in ladder)
+    assert client.post("/api/calibration/preview", json=body).status_code == 200
+
+
+def test_transition_length_rejects_unknown_values(client):
+    ids = upload(client)["track_ids"]
+    body = {"ordered_track_ids": ids, "transition_length": "huge"}
+    assert client.post("/api/mix", json=body).status_code == 422
+    assert client.post("/api/calibration/preview", json=body).status_code == 422
+
+
+def test_mix_and_preview_accept_a_transition_length(client):
+    ids = client.post("/api/tracks", files=song_files(seconds=100.0)).json()["track_ids"]
+    client.post("/api/analyze", json={"track_ids": ids})
+    body = {"ordered_track_ids": ids[:2], "transition_length": "extended"}
+    res = client.post("/api/mix", json=body)
+    assert res.status_code == 200, res.text
+    t = res.json()["manifest"]["transitions"][0]
+    tracks = [Track(**client.get(f"/api/tracks/{i}").json()) for i in ids[:2]]
+    ladder = blend_lengths(*tracks, "extended")
+    assert any(t["requested_overlap_seconds"] == pytest.approx(o) for o in ladder)
+    assert client.post("/api/calibration/preview", json=body).status_code == 200
+
+
+def test_transition_length_rejects_unknown_values(client):
+    ids = upload(client)["track_ids"]
+    body = {"ordered_track_ids": ids, "transition_length": "huge"}
+    assert client.post("/api/mix", json=body).status_code == 422
+    assert client.post("/api/calibration/preview", json=body).status_code == 422
 
 
 def test_unknown_mix_404(client):

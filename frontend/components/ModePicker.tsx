@@ -1,8 +1,18 @@
-import type { MixOptions } from "@/lib/api";
+import type { MixOptions, TransitionLength } from "@/lib/api";
 import { formatSeconds } from "@/lib/format";
 
 const SECONDS_PER_SONG = { Short: 60, Medium: 90, Long: 150 } as const;
 const MIN_SET_SECONDS = 120;
+
+const TRANSITION_LENGTHS: { value: TransitionLength; label: string; detail: string }[] = [
+  { value: "auto", label: "Auto", detail: "Each blend sized to the two songs it joins" },
+  { value: "longer", label: "Longer", detail: "Every blend leans longer, up to about 40 s" },
+  {
+    value: "extended",
+    label: "Extended",
+    detail: "Big blends up to about a minute where the songs allow (DJ sets: limited by set length)",
+  },
+];
 
 /** Default DJ set length for a number of songs (the "Medium" option). */
 export const defaultSetSeconds = (songs: number) =>
@@ -48,6 +58,7 @@ export default function ModePicker({ songs, fullSeconds, options, onChange }: Pr
               aria-checked={selected}
               onClick={() =>
                 onChange({
+                  ...options,
                   mode: m.mode,
                   targetSeconds: m.mode === "set" ? (options.targetSeconds ?? defaultSetSeconds(songs)) : null,
                 })
@@ -77,7 +88,7 @@ export default function ModePicker({ songs, fullSeconds, options, onChange }: Pr
                   type="button"
                   role="radio"
                   aria-checked={selected}
-                  onClick={() => onChange({ mode: "set", targetSeconds: l.seconds })}
+                  onClick={() => onChange({ ...options, mode: "set", targetSeconds: l.seconds })}
                   className={`rounded-full border px-3 py-1 text-sm transition ${
                     selected
                       ? "border-neon-pink/60 bg-neon-pink/15 text-white"
@@ -91,6 +102,35 @@ export default function ModePicker({ songs, fullSeconds, options, onChange }: Pr
           </div>
         </div>
       )}
+
+      <div className="flex flex-col gap-2">
+        <span className="text-xs text-neutral-400">Transition length</span>
+        <div role="radiogroup" aria-label="Transition length" className="flex flex-wrap gap-2">
+          {TRANSITION_LENGTHS.map((t) => {
+            const selected = options.transitionLength === t.value;
+            return (
+              <button
+                key={t.value}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                title={t.detail}
+                onClick={() => onChange({ ...options, transitionLength: t.value })}
+                className={`rounded-full border px-3 py-1 text-sm transition ${
+                  selected
+                    ? "border-neon-pink/60 bg-neon-pink/15 text-white"
+                    : "border-white/10 text-neutral-300 hover:border-white/25"
+                }`}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+        <span className="text-xs text-neutral-500">
+          {TRANSITION_LENGTHS.find((t) => t.value === options.transitionLength)?.detail}
+        </span>
+      </div>
     </section>
   );
 }

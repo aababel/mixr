@@ -7,6 +7,7 @@ from backend.logic.calibration import (
     recommended_overlap_seconds,
     update_preference,
 )
+from backend.logic.windows import overlap_limits
 
 
 def vote(chosen, a=4.0, b=12.0):
@@ -67,6 +68,19 @@ def test_recommended_overlap_maps_preference_to_seconds():
 def test_recommended_overlap_stays_safe(p):
     seconds = recommended_overlap_seconds(p)
     assert DEFAULT_SAFETY.min_overlap_seconds <= seconds <= DEFAULT_SAFETY.max_overlap_seconds
+
+
+@pytest.mark.parametrize("setting", ["auto", "longer", "extended"])
+def test_trial_pair_fits_each_transition_length(setting):
+    short, long = calibration_overlaps(setting)
+    limits = overlap_limits(setting)
+    assert limits.min_overlap_seconds <= short < long <= limits.max_overlap_seconds
+
+
+def test_longer_settings_compare_longer_blends():
+    pairs = [calibration_overlaps(s) for s in ("auto", "longer", "extended")]
+    assert pairs == sorted(pairs)
+    assert pairs[-1][1] > DEFAULT_SAFETY.max_overlap_seconds
 
 
 def test_calibration_range_fits_inside_renderer_safety_limits():

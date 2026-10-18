@@ -12,7 +12,7 @@ import soundfile as sf
 from backend.api.schemas import AppliedTransition, Track, TrackWindow, TransitionRequest
 from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.loudness import gain_notes, track_gain_for_path
-from backend.audio.transition import render_transition
+from backend.audio.transition import DEFAULT_SAFETY, SafetyLimits, render_transition
 from backend.audio.windows import play, with_entry
 
 PREVIEW_CONTEXT_SECONDS = 6.0
@@ -29,6 +29,7 @@ def render_preview(
     loudness_match: bool = True,
     outgoing_window: TrackWindow | None = None,
     incoming_window: TrackWindow | None = None,
+    safety: SafetyLimits = DEFAULT_SAFETY,
 ) -> AppliedTransition:
     """Write a short preview excerpt around the seam to out_path (WAV).
 
@@ -37,6 +38,7 @@ def render_preview(
     outgoing_window / incoming_window: the windows the mix will play (None =
     whole track), so the preview is the seam the mix will contain. Times in
     the result are measured from the start of each window.
+    safety: the same limits the mix renders with.
     """
     out_p = play(load_render_audio(outgoing_path), outgoing, outgoing_window, RENDER_SR)
     in_p = play(load_render_audio(incoming_path), incoming, incoming_window, RENDER_SR)
@@ -52,6 +54,7 @@ def render_preview(
         with_entry(request, in_p.window if incoming_window else None),
         "preview",
         PREVIEW_CONTEXT_SECONDS,
+        safety=safety,
         outgoing_gain_db=g_out.gain_db if g_out else 0.0,
         incoming_gain_db=g_in.gain_db if g_in else 0.0,
         outgoing_melody=out_p.melody,

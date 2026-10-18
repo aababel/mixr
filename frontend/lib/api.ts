@@ -176,14 +176,23 @@ export function orderTracks(trackIds: string[], keepOrder = false) {
   }>("/api/order", { track_ids: trackIds, keep_order: keepOrder });
 }
 
-/** "full" plays every song; "set" trims each song to its best part to hit a target length. */
-export type MixOptions = { mode: "full" | "set"; targetSeconds: number | null };
+/** "auto" sizes each blend to its pair; "longer" leans every blend longer;
+ * "extended" allows blends up to about a minute (128 beats) where the songs suit it. */
+export type TransitionLength = "auto" | "longer" | "extended";
 
-export const FULL_SONGS: MixOptions = { mode: "full", targetSeconds: null };
+/** "full" plays every song; "set" trims each song to its best part to hit a target length. */
+export type MixOptions = {
+  mode: "full" | "set";
+  targetSeconds: number | null;
+  transitionLength: TransitionLength;
+};
+
+export const FULL_SONGS: MixOptions = { mode: "full", targetSeconds: null, transitionLength: "auto" };
 
 const modeFields = (options: MixOptions) => ({
   mode: options.mode,
   target_seconds: options.mode === "set" ? options.targetSeconds : null,
+  transition_length: options.transitionLength,
 });
 
 export function createMix(
