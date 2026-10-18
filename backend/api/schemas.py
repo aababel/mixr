@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 FadeStyle = Literal["equal_power", "linear"]
 RenderMode = Literal["preview", "final"]
 MixMode = Literal["full", "set"]
+TransitionStyle = Literal["blend", "drop"]
 
 
 class Section(BaseModel):
@@ -53,6 +54,8 @@ class TransitionRequest(BaseModel):
     requested_overlap_seconds: float = Field(gt=0)
     fade_style: FadeStyle = "equal_power"
     beat_align: bool = True
+    # "drop": requested_overlap_seconds is the incoming build, ending on its drop
+    style: TransitionStyle = "blend"
 
 
 class AppliedTransition(BaseModel):
@@ -96,6 +99,9 @@ class TrackWindow(BaseModel):
     start_seconds: float
     end_seconds: float
     reason: Optional[str] = None  # e.g. "the drop at 1:12 (loudest section)"
+    # Set when the track enters with a drop transition: its drop, in source-track
+    # seconds, lands as the previous track leaves. start_seconds..drop_seconds is the build.
+    drop_seconds: Optional[float] = None
 
 
 class MixManifest(BaseModel):

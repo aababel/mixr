@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from backend.api.schemas import Track, TrackWindow
+from backend.api.schemas import Track, TrackWindow, TransitionRequest
 
 MIN_WINDOW_SECONDS = 4.0
 FADE_IN_BEATS = 1  # a mix that starts mid-song fades in over about a beat
@@ -31,6 +31,17 @@ class Played:
 
 def beat_seconds(track: Track) -> float:
     return 60.0 / track.bpm if track.bpm else DEFAULT_BEAT_SECONDS
+
+
+def with_entry(request: TransitionRequest, incoming: TrackWindow | None) -> TransitionRequest:
+    """The request for a seam into `incoming` (the window actually played):
+    a drop transition when the window marks a drop, its build as the overlap."""
+    if incoming is None or incoming.drop_seconds is None:
+        return request
+    build = incoming.drop_seconds - incoming.start_seconds
+    if build <= 0:
+        return request
+    return request.model_copy(update={"style": "drop", "requested_overlap_seconds": build})
 
 
 def check_windows(tracks: list[Track], windows: list[TrackWindow]) -> None:

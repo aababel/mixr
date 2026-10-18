@@ -40,7 +40,7 @@ from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.loudness import DEFAULT_LOUDNESS, TrackGain, gain_notes, track_gain_for_path
 from backend.audio.stretch import rubberband_available
 from backend.audio.transition import gain_factor, render_transition, seam_sample_bounds
-from backend.audio.windows import check_windows, edge_fades, play
+from backend.audio.windows import check_windows, edge_fades, play, with_entry
 
 _CHUNK = RENDER_SR * 10  # scale and write long track bodies 10 s at a time
 
@@ -129,11 +129,11 @@ def render_mix(
 
             nxt_track = tracks[i + 1]
             nxt_p, nxt = load(i + 1)
-            request = TransitionRequest(
+            request = with_entry(TransitionRequest(
                 from_id=track.id,
                 to_id=nxt_track.id,
                 requested_overlap_seconds=float(overlap_seconds[i]),
-            )
+            ), nxt_p.window if windows else None)
             seam, applied = render_transition(
                 current, nxt, RENDER_SR,
                 cur_p.beats, nxt_p.beats,

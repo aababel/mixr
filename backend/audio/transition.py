@@ -43,6 +43,11 @@ melody at the seam (outgoing's last 8 s, incoming's first 8 s), steps 2-5
 are replaced by an echo-out: A plays its last bar with the bass filtered
 out, its last beat echoes, and B drops on a downbeat at A's bar line.
 The requested overlap is not used, so both A/B previews are identical.
+
+Drop (drop.py): request.style == "drop" (choose_windows found a drop in the
+incoming song; requested_overlap_seconds is its build). The outgoing song is
+swept, rolled and silenced for a beat, and the incoming drop lands on a
+matched beat at full level. Takes precedence over echo-out.
 """
 from dataclasses import dataclass
 
@@ -50,7 +55,10 @@ import numpy as np
 
 from backend.api.schemas import AppliedTransition, RenderMode, TransitionRequest
 from backend.audio.bands import band_swap
-from backend.audio.echo import MELODY_CLASH, melody_clash, plan_echo_out, render_echo_out
+from backend.audio.drop import DropPlan, plan_drop_cut, render_drop
+from backend.audio.echo import (
+    MELODY_CLASH, last_bar_end, melody_clash, plan_echo_out, render_echo_out,
+)
 from backend.audio.edges import fade_in_seconds, fade_out_seconds
 from backend.audio.seam_plan import (
     GRID_WINDOW_MARGIN_SECONDS, MAX_GLIDE_DEVIATION, SeamPlan, beat_period, deviation,
@@ -404,7 +412,18 @@ def render_transition(
     if mel_a is not None and mel_b is not None:
         notes.append(f"melody at the seam: outgoing {mel_a:.2f}, incoming {mel_b:.2f} "
                      f"(echo-out when both >= {MELODY_CLASH})")
-    if clash:
+    if request.style == "drop" and request.beat_align:
+        # The build runs on full-level music: the outgoing fade-out is cut, not swept.
+        cut = int(round(tail * sr))
+        if cut and out.shape[0] - cut > int(hi * sr):
+            notes.append(f"drop: outgoing's {tail:.2f}s fade-out cut so the build is on full-level music")
+            out = out[:out.shape[0] - cut]
+        seam, plan, eq_desc = _drop(out, inc, sr, list(outgoing_beats_seconds),
+                                    list(incoming_beats_seconds), request, lo, hi, notes, g_out, g_in)
+        notes.extend(plan.notes)
+        changed_for_safety = False
+        region = None
+    elif clash:
         seam, plan, eq_desc = _echo_out(out, inc, sr, list(outgoing_beats_seconds),
                                         list(incoming_beats_seconds), safety, g_out, g_in)
         notes.extend(plan.notes)
@@ -439,7 +458,7 @@ def render_transition(
 
     actual = in_cons / sr
     adjust = 0.0
-    if plan.kind not in ("plain", "echo_out"):
+    if plan.kind not in ("plain", "echo_out", "drop", "drop_cut"):
         adjust = actual - clamped - (head + tail if region else 0.0)
     applied = AppliedTransition(
         from_id=request.from_id,
@@ -473,6 +492,45 @@ def _echo_out(out, inc, sr, out_beats, in_beats, safety, g_out, g_in):
     eq = ("echo-out: outgoing lows (<200 Hz) ramped out over its last bar; last beat echoed "
           "4x on a 1-beat delay, high-passed at 300 Hz, each repeat 6 dB quieter")
     return seam, plan, eq
+
+
+def _drop(out, inc, sr, out_beats, in_beats, request, lo, hi, notes, g_out, g_in):
+    """Drop seam (drop.py): (seam, plan, eq description). Layered on a
+    beat-matched plan when the incoming drop falls on one of its matched
+    beats, else a cut on the outgoing song's own grid."""
+    drop_rel = float(request.requested_overlap_seconds)  # the build: incoming start to its drop
+    out_len, in_len = out.shape[0], inc.shape[0]
+    if drop_rel <= hi:
+        plan = _plan_seam(out, inc, sr, out_beats, in_beats, request, drop_rel, lo, hi, [])
+        if plan.kind in ("glide", "beat_matched") and len(plan.beats) >= 2:
+            x = drop_rel * sr
+            if plan.in_map:
+                src, dst = zip(*plan.in_map)
+                x = float(np.interp(x, src, dst))
+            beats = np.asarray(plan.beats)
+            period = float(np.median(np.diff(beats)))
+            near = int(beats[np.argmin(np.abs(beats - x))])
+            # The drop comes from the tracker's phrase grid; the seam's beats are
+            # locked to the kicks, which can sit up to half a beat away from it.
+            if abs(near - x) < period / 2 and 2 * period <= near <= plan.seam_len:
+                out_seg = _warp_outgoing(out, plan, sr) if plan.out_map else out[plan.o_start:]
+                in_seg = _warp_incoming(inc, plan, sr) if plan.in_map else inc[:plan.in_consumed]
+                dp = DropPlan(kind="drop", o_start=plan.o_start, in_consumed=plan.in_consumed,
+                              seam_len=plan.seam_len, out_map=plan.out_map, in_map=plan.in_map,
+                              beats=plan.beats, tempo_ratio=plan.tempo_ratio,
+                              target_seconds=drop_rel, notes=list(plan.notes),
+                              drop_at=near, period=period / sr, layered=True)
+                seam, desc = render_drop(out_seg, in_seg, sr, dp, float(g_out), float(g_in))
+                return seam, dp, desc
+            notes.append("drop: the incoming drop isn't on a matched beat of the blend, so it's a cut")
+    out_dur = out_len / sr
+    grid_out, _ = _grid(out, sr, out_beats, max(0.0, out_dur - 20.0), out_dur)
+    end_t, period = last_bar_end(out_dur, grid_out)
+    dp = plan_drop_cut(out_len, in_len, sr, end_t, period, drop_rel)
+    in_seg = np.zeros((dp.seam_len, inc.shape[1]), dtype=np.float32)
+    in_seg[dp.drop_at:] = inc[dp.in_consumed - (dp.seam_len - dp.drop_at):dp.in_consumed]
+    seam, desc = render_drop(out[dp.o_start:], in_seg, sr, dp, float(g_out), float(g_in))
+    return seam, dp, desc
 
 
 def _blend(out, inc, sr, outgoing_beats_seconds, incoming_beats_seconds, request,
