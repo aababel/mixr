@@ -236,8 +236,11 @@ def test_full_pipeline(client):
     assert "attachment" in audio.headers["content-disposition"]
     duration = sf.info(io.BytesIO(audio.content)).duration
     assert duration == pytest.approx(manifest["output_duration_seconds"], abs=0.05)
-    overlaps = sum(t["actual_overlap_seconds"] for t in manifest["transitions"])
-    assert duration == pytest.approx(3 * 40.0 - overlaps, abs=0.1)
+    # each seam replaces the outgoing tail and incoming head it consumed
+    ts = manifest["transitions"]
+    consumed = sum((40.0 - t["outgoing_start_seconds"]) + t["actual_overlap_seconds"] for t in ts)
+    seams = sum(t["output_duration_seconds"] for t in ts)
+    assert duration == pytest.approx(3 * 40.0 - consumed + seams, abs=0.1)
 
 
 def test_unknown_mix_404(client):

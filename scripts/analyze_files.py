@@ -36,6 +36,15 @@ def main():
         print(f"  bpm        {out.bpm}  ({len(out.beats_seconds)} beats, first at {out.beats_seconds[0] if out.beats_seconds else '-'}s)")
         print(f"  key        {out.key_camelot or 'unknown'}  ({m['key_name']}, confidence {m['key_confidence']})")
         print(f"  energy     intro {m['intro_energy']:.3f}  outro {m['outro_energy']:.3f}  peak {max(out.energy_rms):.3f}")
+        mel, hop = out.melody_activity, out.energy_hop_seconds or 0.5
+        if mel:
+            n = int(8 / hop)
+            print(f"  melody     first 8s {sum(mel[:n]) / len(mel[:n]):.2f}  last 8s "
+                  f"{sum(mel[-n:]) / len(mel[-n:]):.2f}  (echo-out when both sides of a seam >= 0.5)")
+        print(f"  phrases    {', '.join(f'{p:.1f}' for p in out.phrase_starts_seconds) or '-'}")
+        for sec in out.sections:
+            print(f"  section    {sec.start_seconds:6.1f}-{sec.end_seconds:6.1f}s  energy {sec.energy:.2f}"
+                  f"  {sec.label or ''}")
         for note in m["analysis_notes"]:
             print(f"  note       {note}")
 

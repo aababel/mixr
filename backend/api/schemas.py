@@ -9,6 +9,14 @@ from pydantic import BaseModel, Field
 
 FadeStyle = Literal["equal_power", "linear"]
 RenderMode = Literal["preview", "final"]
+MixMode = Literal["full", "set"]
+
+
+class Section(BaseModel):
+    start_seconds: float  # on a phrase start (the first section starts at 0)
+    end_seconds: float
+    energy: float  # mean loudness of the section, 0-1 relative to the track's loudest section
+    label: Optional[str] = None  # "intro" | "verse" | "build" | "chorus" | "drop" | "break" | "outro"; None unless confident
 
 
 class Track(BaseModel):
@@ -21,6 +29,9 @@ class Track(BaseModel):
     key_camelot: Optional[str] = None  # null when key detection is unreliable
     energy_rms: list[float] = Field(default_factory=list)
     energy_hop_seconds: Optional[float] = None
+    phrase_starts_seconds: list[float] = Field(default_factory=list)  # every 8 bars on the beat grid; [] without beats
+    sections: list[Section] = Field(default_factory=list)  # contiguous, cover the whole track
+    melody_activity: list[float] = Field(default_factory=list)  # 0-1 per energy_hop_seconds: lead melody/vocal present
     analysis_status: Literal["pending", "ok", "error"] = "pending"
     analysis_error: Optional[str] = None
     metadata: dict = Field(default_factory=dict)
@@ -78,6 +89,15 @@ class Preference(BaseModel):
     completed: bool = False
 
 
+class TrackWindow(BaseModel):
+    """The part of a track that plays in the mix, in source-track seconds."""
+
+    track_id: str
+    start_seconds: float
+    end_seconds: float
+    reason: Optional[str] = None  # e.g. "the drop at 1:12 (loudest section)"
+
+
 class MixManifest(BaseModel):
     mix_id: str
     ordered_track_ids: list[str]
@@ -87,3 +107,5 @@ class MixManifest(BaseModel):
     calibrated: bool
     overlap_preference: float
     limitations: list[str] = Field(default_factory=list)
+    mode: MixMode = "full"
+    windows: list[TrackWindow] = Field(default_factory=list)  # windows actually played, same order as ordered_track_ids

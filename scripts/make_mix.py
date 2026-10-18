@@ -2,6 +2,7 @@
 
 Usage:
     python scripts/make_mix.py song1.mp3 song2.mp3 song3.mp3 [--overlap 8] [--out out/mix.wav] [--no-loudness]
+        [--window 0-180 --window 12.5-200 ...]   one per file, seconds; "-" = whole track
 
 Runs analysis, renders every seam with the shared renderer, writes the mix
 and manifest.json next to it. Ordering and scoring are Sahil's; this script
@@ -17,7 +18,7 @@ import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend.api.schemas import Track  # noqa: E402
+from backend.api.schemas import Track, TrackWindow  # noqa: E402
 from backend.audio.analysis import analyze_track  # noqa: E402
 from backend.audio.mix import render_mix  # noqa: E402
 
@@ -28,6 +29,8 @@ def main():
     ap.add_argument("--overlap", type=float, default=8.0, help="requested overlap per seam, seconds")
     ap.add_argument("--out", default="out/mix.wav")
     ap.add_argument("--no-loudness", action="store_true", help="skip loudness matching (0 dB gain)")
+    ap.add_argument("--window", action="append", default=[],
+                    help="START-END seconds to play from each file, in file order ('-' = whole track)")
     args = ap.parse_args()
     if len(args.files) < 2:
         sys.exit("need at least two files")
@@ -44,9 +47,19 @@ def main():
         tracks.append(tr)
     t1 = time.time()
 
+    windows = None
+    if args.window:
+        if len(args.window) != len(paths):
+            sys.exit("give one --window per file")
+        windows = []
+        for tr, w in zip(tracks, args.window):
+            a, _, b = w.partition("-")
+            windows.append(TrackWindow(track_id=tr.id, start_seconds=float(a or 0),
+                                       end_seconds=float(b) if b else tr.duration_seconds))
+
     out = Path(args.out)
     manifest = render_mix("local", tracks, paths, [args.overlap] * (len(paths) - 1), out,
-                          loudness_match=not args.no_loudness)
+                          loudness_match=not args.no_loudness, windows=windows)
     t2 = time.time()
 
     out.with_name("manifest.json").write_text(json.dumps(manifest.model_dump(), indent=2))

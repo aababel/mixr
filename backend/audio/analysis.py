@@ -13,6 +13,9 @@ Fields filled:
                           when the estimate is weak (see KEY_MIN_CORRELATION)
   energy_rms              RMS per ENERGY_HOP_SECONDS block (0..1 float)
   energy_hop_seconds      ENERGY_HOP_SECONDS
+  melody_activity         0-1 lead melody/vocal level per energy block (cues.py)
+  phrase_starts_seconds   every 8 bars on the beat grid (cues.py); [] without beats
+  sections                contiguous sections on phrase starts (cues.py); [] without beats
   metadata                key_name, key_confidence, intro/outro mean energy,
                           analysis_sample_rate, notes
 """
@@ -22,6 +25,7 @@ import librosa
 import numpy as np
 
 from backend.api.schemas import Track
+from backend.audio.cues import analyze_cues
 
 ANALYSIS_SR = 22050
 ENERGY_HOP_SECONDS = 0.5
@@ -137,6 +141,13 @@ def analyze_track(path: Path, track: Track) -> Track:
         energy = block_rms(y, sr, ENERGY_HOP_SECONDS)
         edge_blocks = max(1, int(EDGE_SECONDS / ENERGY_HOP_SECONDS))
 
+        try:
+            cues = analyze_cues(y, sr, beats_seconds, decoded_seconds, energy, ENERGY_HOP_SECONDS)
+            notes.extend(cues["notes"])
+        except Exception as exc:  # cue points are optional: never fail the whole analysis
+            cues = {"melody_activity": [], "phrase_starts_seconds": [], "sections": []}
+            notes.append(f"cue analysis failed ({exc}); no melody, phrases or sections")
+
         metadata = dict(track.metadata)
         metadata.update(
             {
@@ -158,6 +169,9 @@ def analyze_track(path: Path, track: Track) -> Track:
                 "key_camelot": camelot,
                 "energy_rms": energy,
                 "energy_hop_seconds": ENERGY_HOP_SECONDS,
+                "melody_activity": cues["melody_activity"],
+                "phrase_starts_seconds": cues["phrase_starts_seconds"],
+                "sections": cues["sections"],
                 "analysis_status": "ok",
                 "analysis_error": None,
                 "metadata": metadata,
