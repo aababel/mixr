@@ -152,6 +152,17 @@ the gains actually applied to the two tracks at that seam (0.0 when
 `loudness_match=False`). The UI can show it as "track turned down 5.2 dB to
 match".
 
+**A/B preview leveling** (`preview.py`, on by default, `level_match=True`):
+after the seam is rendered, the whole preview excerpt is scaled by one
+uniform gain to `PREVIEW_TARGET_LUFS` (-16 LUFS), so A and B play at the
+same integrated loudness and the louder one can't win the vote just for
+being louder. The seam itself is unchanged: the preview is exactly the mix's
+seam times that one gain. The gain is recorded as
+`applied_gain_db["preview_output"]` (absent with `level_match=False`; never
+present in final-mix transitions). If a boost would pass the 0.98 sample
+peak it stops short and a `preview level: ...` note goes in
+`safety_adjustments`. Routes need no change.
+
 ### Claude mood (optional)
 
 ```python

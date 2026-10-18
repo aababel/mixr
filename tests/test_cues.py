@@ -224,7 +224,8 @@ def test_preview_uses_the_windows(tmp_path):
     got, _ = sf.read(out, dtype="float32")
     assert t.outgoing_start_seconds == pytest.approx(te.outgoing_start_seconds)
     assert t.actual_overlap_seconds == pytest.approx(te.actual_overlap_seconds)
-    np.testing.assert_allclose(got, np.clip(expected, -1, 1), atol=Q)
+    level = 10 ** (t.applied_gain_db["preview_output"] / 20)
+    np.testing.assert_allclose(got, np.clip(expected, -1, 1) * level, atol=2 * Q)
 
 
 def test_bad_windows_are_rejected():

@@ -157,12 +157,14 @@ def test_preview_applies_same_gain_as_mix(tmp_path, uneven):
 
     m = render_mix("lm", [tl, tq], [pl, pq], [5.0], tmp_path / "mix.wav")
     mix, _ = sf.read(tmp_path / "mix.wav", dtype="float32")
-    assert applied.applied_gain_db == m.transitions[0].applied_gain_db
+    track_gains = {k: v for k, v in applied.applied_gain_db.items() if k != "preview_output"}
+    assert track_gains == m.transitions[0].applied_gain_db
     assert applied.applied_gain_db["outgoing"] != 0.0
 
     ctx = round(PREVIEW_CONTEXT_SECONDS * SR)
     start = round(applied.outgoing_start_seconds * SR) - ctx
-    np.testing.assert_allclose(prev, mix[start:start + len(prev)], atol=Q)
+    level = 10 ** (applied.applied_gain_db["preview_output"] / 20)
+    np.testing.assert_allclose(prev, mix[start:start + len(prev)] * level, atol=2 * Q)
 
 
 def test_peak_limited_track_is_reported(tmp_path):
@@ -185,3 +187,50 @@ def test_single_track_mix_gets_gain(tmp_path, uneven):
     mix, _ = sf.read(tmp_path / "one.wav", dtype="float32")
     assert m.transitions == []
     assert integrated_loudness(mix, SR) == pytest.approx(TARGET, abs=0.1)
+
+
+# ---------------------------------------------------------------- A/B preview leveling
+
+from backend.audio.preview import PREVIEW_TARGET_LUFS, level_preview  # noqa: E402
+
+
+def test_ab_previews_play_at_the_same_loudness(tmp_path):
+    # Short vs long blend of the same pair, track loudness matching off so the
+    # raw renders sit well away from the preview target. Leveling must bring
+    # both to the same measured loudness, and record the gain it applied.
+    a = noise(40, 0.03, 21)
+    a[-14 * SR:] *= 0.3  # quiet outro: the two excerpts contain different material
+    pa, ta = write(tmp_path, "a", a)
+    pb, tb = write(tmp_path, "b", noise(40, 0.05, 22))
+    raw, lev = {}, {}
+    for s in (2.0, 12.0):
+        req = TransitionRequest(from_id="a", to_id="b", requested_overlap_seconds=s)
+        render_preview(pa, pb, ta, tb, req, tmp_path / f"raw{s}.wav",
+                       loudness_match=False, level_match=False)
+        ap = render_preview(pa, pb, ta, tb, req, tmp_path / f"lev{s}.wav", loudness_match=False)
+        raw[s] = integrated_loudness(sf.read(tmp_path / f"raw{s}.wav", dtype="float32")[0], SR)
+        lev[s] = integrated_loudness(sf.read(tmp_path / f"lev{s}.wav", dtype="float32")[0], SR)
+        # The recorded gain is what moved the excerpt from raw to leveled.
+        assert lev[s] - raw[s] == pytest.approx(ap.applied_gain_db["preview_output"], abs=0.05)
+        assert lev[s] == pytest.approx(PREVIEW_TARGET_LUFS, abs=0.1)
+    assert all(abs(r - PREVIEW_TARGET_LUFS) > 3 for r in raw.values())  # leveling did real work
+    assert abs(lev[12.0] - lev[2.0]) < 0.1
+
+
+def test_level_match_off_records_nothing(tmp_path, uneven):
+    (pl, tl), (pq, tq) = uneven
+    req = TransitionRequest(from_id="loud", to_id="quiet", requested_overlap_seconds=4.0)
+    ap = render_preview(pl, pq, tl, tq, req, tmp_path / "p.wav", level_match=False)
+    assert "preview_output" not in ap.applied_gain_db
+    assert not any(n.startswith("preview level") for n in ap.safety_adjustments)
+
+
+def test_level_preview_boost_respects_peak_ceiling():
+    y = noise(5, 0.001, 30)
+    y[SR] = 0.5  # one hot sample: only ~5.8 dB of headroom
+    out, gain, note = level_preview(y, SR)
+    assert gain == pytest.approx(20 * np.log10(DEFAULT_LOUDNESS.peak_ceiling / 0.5), abs=0.01)
+    assert np.max(np.abs(out)) <= DEFAULT_LOUDNESS.peak_ceiling + 1e-6
+    assert note and "peak headroom" in note
+    silent, g0, n0 = level_preview(np.zeros((SR, 2), np.float32), SR)
+    assert g0 == 0.0 and "not measurable" in n0
