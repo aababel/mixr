@@ -84,17 +84,39 @@ def test_full_mode_without_cue_data_keeps_whole_songs():
     check_windows(tracks, windows)
 
 
-def test_full_mode_hands_the_melody_over_on_phrases():
+def test_full_mode_leaves_on_a_quiet_phrase_when_the_next_song_sings_at_once():
     # A sings until the very end, except the phrase ending at 160 where its
-    # vocal line stops. B sings from its first second, then has an
-    # instrumental phrase from 16 to 32.
+    # vocal line stops. B sings from its first second.
+    a = make_track("a", melody=[(0, 192, 0.9), (148, 160, 0.1)])
+    b = make_track("b", melody=[(0, 192, 0.9)])
+    wa, wb = choose_windows([a, b], [8.0])
+    assert (wa.start_seconds, wa.end_seconds) == (0.0, 160.0)
+    assert (wb.start_seconds, wb.end_seconds) == (0.0, 192.0)
+    assert "melody" in wa.reason and "2:40" in wa.reason
+
+
+def test_full_mode_enters_on_the_instrumental_phrase_before_the_vocal():
+    # B sings from its first second, then has an instrumental phrase from 16
+    # to 32: entering there puts A's last line over B's instrumental and B's
+    # vocal right after the blend.
     a = make_track("a", melody=[(0, 192, 0.9), (148, 160, 0.1)])
     b = make_track("b", melody=[(0, 192, 0.9), (16, 32, 0.1)])
     wa, wb = choose_windows([a, b], [8.0])
-    assert (wa.start_seconds, wa.end_seconds) == (0.0, 160.0)
     assert (wb.start_seconds, wb.end_seconds) == (16.0, 192.0)
-    assert "melody" in wa.reason and "melody" in wb.reason
-    assert "0:16" in wb.reason and "2:40" in wa.reason
+    assert wa.end_seconds == 192.0, "no 20 s melody gap from leaving on A's quiet phrase"
+    assert "0:16" in wb.reason and "melody" in wb.reason
+
+
+def test_full_mode_skips_a_long_instrumental_intro_after_a_vocal():
+    # A sings into its ending; B is loud but has no melody for its first
+    # 48 s. Coming in at 0 leaves ~40 s without melody: enter one phrase
+    # before B's melody instead.
+    a = make_track("a", melody=[(0, 192, 0.8)])
+    b = make_track("b", melody=[(0, 48, 0.1), (48, 192, 0.8)])
+    wa, wb = choose_windows([a, b], [8.0])
+    assert wb.start_seconds == 32.0
+    assert "after the blend" in wb.reason
+    assert "without melody" not in wa.reason
 
 
 def test_full_mode_prefers_the_latest_good_end_and_earliest_good_start():
@@ -212,7 +234,7 @@ def test_set_mode_works_without_phrases_or_beats():
     assert abs(played(windows, [8.0, 8.0]) - 240.0) <= SET_TOLERANCE * 240.0
 
 
-def test_set_mode_enters_on_a_labeled_break_when_the_melody_drops():
+def test_set_mode_enters_in_a_break_so_the_next_section_lands_as_a_leaves():
     sections = [Section(start_seconds=0, end_seconds=96, energy=0.9),
                 Section(start_seconds=96, end_seconds=128, energy=0.4, label="break"),
                 Section(start_seconds=128, end_seconds=240, energy=1.0)]
@@ -220,8 +242,18 @@ def test_set_mode_enters_on_a_labeled_break_when_the_melody_drops():
     b = make_track("b", duration=240.0, sections=sections,
                    melody=[(0, 240, 0.9), (96, 128, 0.2)], energy=[(96, 128, 0.4), (128, 176, 1.0)])
     wa, wb = choose_windows([a, b], [8.0], 200.0)
-    assert wb.start_seconds == 96.0
-    assert "its break" in wb.reason
+    assert wb.start_seconds == 112.0, "last phrase of the break: B's melody kicks in after the blend"
+    assert "after the blend" in wb.reason
+
+
+def test_full_mode_skips_an_outro_running_into_a_sparse_intro():
+    # A's last 32 s and B's first 32 s are thin (quiet, no melody). Blending
+    # them is a handoff with nothing playing: trim into the music instead.
+    a = make_track("a", melody=[(0, 192, 0.8), (160, 192, 0.1)], energy=[(160, 192, 0.25)])
+    b = make_track("b", melody=[(0, 32, 0.1), (32, 192, 0.8)], energy=[(0, 32, 0.25)])
+    wa, wb = choose_windows([a, b], [8.0])
+    assert wa.end_seconds <= 160.0 or wb.start_seconds >= 32.0
+    assert "sparse" not in wa.reason
 
 
 def test_best_section_prefers_labeled_chorus_then_loudest_stretch():

@@ -334,12 +334,22 @@ How the implementation decides (constants at the top of the module):
   or start is judged past its fade-out / quiet lead-in (from `energy_rms`),
   where `transition.py` actually places the blend.
 - Melody and energy are measured over the overlap, or over echo.py's 8 s
-  if that's longer. Seam quality = 0.55 handoff + 0.25 energy + 0.20
-  structure. Handoff penalizes both melodies at once most, then A still
-  singing, then B starting busy; a falling A line earns a bonus; both sides
-  at echo.py's clash level cost extra.
+  if that's longer. Seam quality = 0.35 handoff x groove + 0.15 groove +
+  0.20 flow + 0.10 payoff + 0.10 energy match + 0.10 structure.
+  - Handoff penalizes both melodies at once most, then A still singing,
+    then B starting busy; a falling A line earns a bonus; both sides at
+    echo.py's clash level cost extra.
+  - Groove: both songs near their normal loudness during the blend. It also
+    scales the handoff, because quiet melody over a quiet blend is dead air
+    (an outro running into a sparse intro), not a clean handoff.
+  - Flow: seconds with no melody from either song across the seam, from A's
+    last melodic moment to B's first. Up to 8 s is fine; 32 s scores 0. This
+    stops a vocal ending from running into a long instrumental intro.
+  - Payoff: B's energy and melody in the 16 s right after the blend.
 - Full mode: the first song starts at 0 and the last plays to its end; each
-  trimmed second costs 0.004 and no edge loses more than 30% of its song.
+  trimmed second costs 0.003 (a sparse second, below 0.7 of the song's
+  normal loudness, proportionally less) and no edge loses more than 30% of
+  its song.
 - Set mode: per-song target lengths split `target_seconds + sum(overlaps)`
   evenly (bounded by each song's length and the 45 s floor), cost = relative
   length error + 0.3 x the part of the best section left out. The best
