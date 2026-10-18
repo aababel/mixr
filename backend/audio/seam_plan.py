@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
 
-MAX_GLIDE_DEVIATION = 0.12  # max |tempo ratio - 1| (after folding) for a glide
+MAX_GLIDE_DEVIATION = 0.14  # max |tempo ratio - 1| (after folding) for a glide
 MAX_DRIFT_SECONDS = 0.005  # below this total drift, beats are matched without warping
 SHORT_BLEND_BEATS = 2.0
 GRID_MAX_RMS_SECONDS = 0.02  # inlier jitter above this: grid rejected
@@ -320,16 +320,21 @@ def plan_matched(
     return None
 
 
-def plan_short(out_len: int, in_len: int, sr: int, g_in: Grid, lo: float, hi: float) -> SeamPlan | None:
+def plan_short(out_len: int, in_len: int, sr: int, g_in: Grid, lo: float, hi: float,
+               head: float = 0.0, tail: float = 0.0) -> SeamPlan | None:
     """~2-beat blend that ends exactly on an incoming beat, preferring a bar
     line (every 4th beat counted from the first detected beat) within one beat
-    of the 2-beat target. No warp, so there is no time for the beats to drift."""
+    of the 2-beat target. No warp, so there is no time for the beats to drift.
+
+    head / tail: fade-in on the incoming start and fade-out on the outgoing
+    end (seconds). The blend starts after the head, and the seam runs `tail`
+    past the blend so the outgoing fade plays under the incoming track."""
     p = g_in.period
     n_before = math.floor(g_in.first / p)
     in_pre = g_in.first - n_before * p
-    target = SHORT_BLEND_BEATS * p
-    lo = min(lo, 1.5 * p)  # a 2-beat cut may be shorter than the general 1 s minimum
-    limit = min(hi, out_len / sr, in_len / sr)
+    target = head + SHORT_BLEND_BEATS * p
+    lo = head + min(lo, 1.5 * p)  # a 2-beat cut may be shorter than the general 1 s minimum
+    limit = min(hi, out_len / sr, in_len / sr) - tail
     cands = []
     j = 0
     while in_pre + j * p <= limit + 1e-9:
@@ -341,12 +346,13 @@ def plan_short(out_len: int, in_len: int, sr: int, g_in: Grid, lo: float, hi: fl
         return None
     bars = [c for c in cands if c[1] and abs(c[0] - target) <= p + 1e-9]
     t, on_bar = min(bars or cands, key=lambda c: abs(c[0] - target))
-    ov = int(round(t * sr))
+    ov = int(round((t + tail) * sr))
     beats = [int(round((in_pre + j * p) * sr)) for j in range(int(t / p) + 2)]
     plan = SeamPlan(
         kind="short", o_start=out_len - ov, in_consumed=ov, seam_len=ov,
         beats=[b for b in beats if 0 <= b <= ov], target_seconds=target,
     )
     where = "an incoming bar line" if on_bar else "an incoming beat"
-    plan.notes.append(f"short blend of {t:.2f}s ({t / p:.1f} beats at {g_in.bpm:.1f} BPM) ending on {where}")
+    plan.notes.append(f"short blend of {t - head:.2f}s ({(t - head) / p:.1f} beats at {g_in.bpm:.1f} BPM) "
+                      f"ending on {where}")
     return plan

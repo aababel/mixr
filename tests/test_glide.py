@@ -219,3 +219,27 @@ def test_render_matches_kicks_despite_phase_jump():
     assert any("from kick onsets" in s for s in ap.safety_adjustments)
     for b in ib[1:8]:  # the TRUE incoming clicks land on outgoing clicks
         assert min(abs(ap.outgoing_start_seconds + b - x) for x in ob) < 0.006
+
+
+# ---------------------------------------------------------------- half/double time, glide limit
+
+
+@needs_rb
+def test_half_and_double_time_pairs_are_matched_on_every_other_beat():
+    """100 vs 200 BPM is 0% apart once folded per pair, whatever each song's
+    own BPM reads as: matched beat-for-beat on every other incoming beat."""
+    out, ob = clicks(40, 100, first=0.2, seed=11)
+    inc, ib = clicks(40, 200, first=0.1, seed=12)
+    _, ap = render_transition(out, inc, SR, ob, ib, req(8.0), "final")
+    notes = " ".join(ap.safety_adjustments)
+    assert "short blend" not in notes
+    assert "beats matched" in notes or "tempo glide" in notes
+
+
+@needs_rb
+def test_tempos_13_percent_apart_now_glide():
+    out, ob = clicks(40, 128, seed=13)
+    inc, ib = clicks(40, 144, seed=14)
+    _, ap = render_transition(out, inc, SR, ob, ib, req(8.0), "final")
+    assert ap.tempo_change == pytest.approx(144 / 128, rel=3e-3)
+    assert any("tempo glide" in s for s in ap.safety_adjustments)

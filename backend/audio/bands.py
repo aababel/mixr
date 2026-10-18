@@ -13,6 +13,11 @@ Gains across the seam:
     mids   the request's fade_style crossfade (equal-power by default)
 Swap points move to the nearest matched beat when one is close, so the swap
 falls on a kick and between off-beat hats.
+
+All of this happens inside the blend region [r0, r1) of the seam (the whole
+seam unless transition.py moved the crossfade off a fade-in head or a
+fade-out tail): before r0 only the outgoing track sounds, after r1 only the
+incoming one. Swap fractions are fractions of the region.
 """
 from functools import lru_cache
 
@@ -50,10 +55,12 @@ def split_bands(x: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray, np.ndar
     return low, x64 - low - high, high
 
 
-def swap_point(n: int, at: float, window: tuple[float, float], beats: list[int]) -> int:
-    """Sample where a band swaps: the beat nearest at*n if one lies in the window."""
-    target = at * n
-    inside = [b for b in beats if window[0] * n <= b <= window[1] * n]
+def swap_point(n: int, at: float, window: tuple[float, float], beats: list[int],
+               r0: int = 0) -> int:
+    """Sample where a band swaps: the beat nearest r0 + at*n if one lies in the
+    window. n is the region length, r0 its start in the seam."""
+    target = r0 + at * n
+    inside = [b for b in beats if r0 + window[0] * n <= b <= r0 + window[1] * n]
     if inside:
         return int(min(inside, key=lambda b: abs(b - target)))
     return int(round(target))
@@ -74,21 +81,27 @@ def swap_gains(n: int, at: int, ramp: int) -> tuple[np.ndarray, np.ndarray]:
 def band_swap(
     out_seg: np.ndarray, in_seg: np.ndarray, sr: int, beats: list[int],
     mid_fade_out: np.ndarray, mid_fade_in: np.ndarray,
+    region: tuple[int, int] | None = None,
 ) -> tuple[np.ndarray, str]:
     """Blend two equal-length (samples, ch) segments band by band.
 
+    region: (r0, r1) blend region in samples, default the whole seam. The mid
+    fades must already be 1/0 outside it.
     Returns (blend float64, description for AppliedTransition.applied_eq).
     """
     n = out_seg.shape[0]
+    r0, r1 = region if region else (0, n)
     o_low, o_mid, o_high = split_bands(out_seg, sr)
     i_low, i_mid, i_high = split_bands(in_seg, sr)
-    bass_at = swap_point(n, BASS_SWAP_AT, BASS_SNAP_WINDOW, beats)
-    high_at = swap_point(n, HIGH_SWAP_AT, HIGH_SNAP_WINDOW, beats)
+    bass_at = swap_point(r1 - r0, BASS_SWAP_AT, BASS_SNAP_WINDOW, beats, r0)
+    high_at = swap_point(r1 - r0, HIGH_SWAP_AT, HIGH_SNAP_WINDOW, beats, r0)
     bo, bi = swap_gains(n, bass_at, int(round(BASS_RAMP_SECONDS * sr)))
     ho, hi = swap_gains(n, high_at, int(round(HIGH_RAMP_SECONDS * sr)))
     blend = (o_low * bo + i_low * bi + o_high * ho + i_high * hi
              + o_mid * mid_fade_out + i_mid * mid_fade_in)
     desc = (f"3-band swap: lows <{LOW_HZ:.0f} Hz swapped at {bass_at / sr:.2f}s "
-            f"({100 * bass_at / n:.0f}%), highs >{HIGH_HZ:.0f} Hz swapped at {high_at / sr:.2f}s "
-            f"({100 * high_at / n:.0f}%), mids crossfaded")
+            f"({100 * (bass_at - r0) / max(1, r1 - r0):.0f}%), highs >{HIGH_HZ:.0f} Hz swapped at "
+            f"{high_at / sr:.2f}s ({100 * (high_at - r0) / max(1, r1 - r0):.0f}%), mids crossfaded")
+    if (r0, r1) != (0, n):
+        desc += f" over {r0 / sr:.2f}-{r1 / sr:.2f}s of the {n / sr:.2f}s seam"
     return blend, desc
