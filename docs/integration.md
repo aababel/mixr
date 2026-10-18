@@ -384,9 +384,10 @@ the longest one that does. Each reason ends with the length and why
 ("Long blend into X (64 beats, 29 s): their notes line up.").
 
 **Transition length setting** (`transition_length`, `windows.BLEND_SIZES`):
-`"auto"` (default) is exactly the above. `"longer"` adds 1.0 to p and raises
-the cap to 40 s, so 64-beat blends fit at 96+ BPM. `"extended"` adds 1.5 to
-p, tries 16/32/64/128 beats up to 60 s, halves the stack penalty (vocal
+`"auto"` (default) is exactly the above. `"longer"` adds 1.0 to p, tries
+16/32/48/64/80 beats and raises the cap to 40 s. `"extended"` adds 1.5 to
+p, tries 16/32/64/96/128 beats up to 60 s (at 124 BPM the longest blends are
+about 31, 39 and 46 s for the three settings), halves the stack penalty (vocal
 clashes still shorten a blend, just less) and budgets set-mode windows for
 the longest length. Tempos that can't be beat-matched still get the 4 s
 blend, and the fit-in-half-a-window rule still applies; in set mode the

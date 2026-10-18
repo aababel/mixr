@@ -73,6 +73,9 @@ from backend.audio.stretch import engine_name, rubberband_available, timemap_str
 MIN_BLEND_SECONDS = 1.0  # blend region shorter than this: edges are ignored
 WARP_CONTEXT_SECONDS = 0.25  # extra audio fed to Rubber Band beyond each warped edge
 EDGE_BLEND_SECONDS = 0.010  # crossfade between untouched track and warped seam edge
+# A beat grid that can't be found over the blend's own span is retried over
+# this much audio: a breakdown can hide the kick for half a minute.
+GRID_RETRY_SECONDS = 64.0
 
 
 @dataclass(frozen=True)
@@ -264,6 +267,11 @@ def _plan_seam(
     span = hi_all + GRID_WINDOW_MARGIN_SECONDS
     g_out, src_out = _grid(out, sr, out_beats, max(0.0, out_dur - span), out_dur)
     g_in, src_in = _grid(inc, sr, in_beats, 0.0, min(in_dur, span))
+    wide = max(span, GRID_RETRY_SECONDS)
+    if g_out is None and out_dur > span:
+        g_out, src_out = _grid(out, sr, out_beats, max(0.0, out_dur - wide), out_dur)
+    if g_in is None and in_dur > span:
+        g_in, src_in = _grid(inc, sr, in_beats, 0.0, min(in_dur, wide))
     if g_out and g_in:
         notes.append(f"beat grids: outgoing {g_out.bpm:.2f} BPM from {src_out}, "
                      f"incoming {g_in.bpm:.2f} BPM from {src_in}")

@@ -506,10 +506,15 @@ def test_transition_length_sets_the_blend_ladder():
     a, b = make_track("a"), make_track("b")
     # 120 BPM: 128 beats is 64 s, past even Extended's cap.
     assert blend_lengths(a, b, "auto") == [8.0, 16.0, 32.0]
-    assert blend_lengths(a, b, "extended") == [8.0, 16.0, 32.0]
+    assert blend_lengths(a, b, "longer") == [8.0, 16.0, 24.0, 32.0, 40.0]
+    assert blend_lengths(a, b, "extended") == [8.0, 16.0, 32.0, 48.0]
     _at_bpm(a, 100.0), _at_bpm(b, 100.0)
     assert blend_lengths(a, b, "auto") == pytest.approx([9.6, 19.2])
-    assert blend_lengths(a, b, "longer") == pytest.approx([9.6, 19.2, 38.4])  # 64 beats fits 40 s
+    assert blend_lengths(a, b, "longer") == pytest.approx([9.6, 19.2, 28.8, 38.4])  # 64 beats fits 40 s
+    # Regression: at dance tempos all three settings topped out at 64 beats.
+    _at_bpm(a, 124.0), _at_bpm(b, 124.0)
+    longest = [max(blend_lengths(a, b, s)) for s in ("auto", "longer", "extended")]
+    assert longest[0] < longest[1] < longest[2]
     _at_bpm(a, 132.0), _at_bpm(b, 132.0)
     assert blend_lengths(a, b, "extended")[-1] == pytest.approx(128 * 60 / 132)
     for setting in BLEND_SIZES:

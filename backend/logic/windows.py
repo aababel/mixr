@@ -187,13 +187,15 @@ class BlendSize:
     size_for_longest: bool  # set mode sizes windows for the longest length, not the middle one
 
 
-# auto: the songs decide. longer: every seam leans long and may reach 64
-# beats at 96+ BPM. extended: up to 128 beats and 60 s, vocal clashes still
-# shorten a blend but half as much, and set-mode windows grow to fit.
+# auto: the songs decide. longer: every seam leans long, up to 80 beats and
+# 40 s. extended: up to 128 beats and 60 s, vocal clashes still shorten a
+# blend but half as much, and set-mode windows grow to fit. Every length is
+# whole 16-beat half-phrases, and each setting reaches past the one below it
+# at dance tempos (about 31 s, 39 s and 46 s at 124 BPM).
 BLEND_SIZES: dict[str, BlendSize] = {
     "auto": BlendSize((16, 32, 64), BLEND_FALLBACK_SECONDS, MAX_BLEND_SECONDS, 0.0, 1.0, False),
-    "longer": BlendSize((16, 32, 64), (8.0, 16.0, 24.0, 32.0), 40.0, 1.0, 1.0, False),
-    "extended": BlendSize((16, 32, 64, 128), (8.0, 16.0, 32.0, 48.0, 60.0), 60.0, 1.5, 0.5, True),
+    "longer": BlendSize((16, 32, 48, 64, 80), (8.0, 16.0, 24.0, 32.0, 40.0), 40.0, 1.0, 1.0, False),
+    "extended": BlendSize((16, 32, 64, 96, 128), (8.0, 16.0, 32.0, 48.0, 60.0), 60.0, 1.5, 0.5, True),
 }
 
 
@@ -294,7 +296,7 @@ def _choose_length(options: list[_Seam], preference: float, stack_weight: float)
 
 def blend_lengths(a: Track, b: Track, transition_length: str = "auto") -> list[float]:
     """Blend lengths to try between A and B, shortest first: whole phrases
-    (16-64 beats, up to 128 for "extended") of A's beat within the setting's
+    (16-64 beats, up to 80 for "longer" and 128 for "extended") of A's beat within the setting's
     cap, one short blend when the tempos can't be beat-matched, a plain time
     ladder without tempo."""
     size = BLEND_SIZES[transition_length]
@@ -795,7 +797,7 @@ def _length_text(c: _Cues, nxt: _Cues, seam: _Seam, options: list[_Seam], i: int
     size = f"{beats}{seam.overlap:.0f} s"
     if not tempos_blend(c.track, nxt.track):
         return (f"Short blend into {nxt.name} ({size}): their tempos are too far apart "
-                f"to beat-match for long.")
+                f"to beat-match for long, at any transition length.")
     if len(options) < 2:
         return ""
     # Past the auto cap only the longer settings reach.
@@ -983,6 +985,9 @@ def _plan(
                 parts.append(f"Plays inside its loudest part ({_clock(b0)}-{_clock(b1)}).")
         if c.duration < mins[i]:
             parts.append("Too short to trim, so it plays in full.")
+        if drop_out and preference is not None and not tempos_blend(c.track, cues[i + 1].track):
+            parts.append(f"Its tempo is too far from {next_name}'s to beat-match, so this is a quick "
+                         f"cut at any transition length.")
         if tail is not None and not drop_out:
             ej, next_end = picks[i + 1]
             nxt = cues[i + 1]

@@ -179,6 +179,16 @@ def test_matching_tempos_are_not_warped(monkeypatch):
     assert any("beats matched" in s for s in ap.safety_adjustments)
 
 
+def test_grid_hidden_by_a_breakdown_is_found_over_more_audio():
+    # Regression: the incoming window opened on a breakdown with no kick, so
+    # its grid failed over the blend's span and a 31 s blend became an echo-out.
+    out, ob = clicks(90, 124, seed=11)
+    inc, ib = clicks(90, 124, first=45.1, seed=12)
+    _, ap = render_transition(out, inc, SR, ob, ib, req(12.0), "final")
+    assert any("beats matched" in s for s in ap.safety_adjustments)
+    assert ap.actual_overlap_seconds > 10.0  # a whole-phrase blend, not a 2-beat cut
+
+
 # ---------------------------------------------------------------- short-blend fallback
 
 
