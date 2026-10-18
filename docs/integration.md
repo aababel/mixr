@@ -171,13 +171,21 @@ present in final-mix transitions). If a boost would pass the 0.98 sample
 peak it stops short and a `preview level: ...` note goes in
 `safety_adjustments`. Routes need no change.
 
-### Claude mood (optional)
+### Claude mood (optional, `mood.py`)
 
 ```python
 def mood_scores(tracks: list[Track]) -> dict[tuple[str, str], float] | None:
     """Directed mood compatibility in [0, 1] keyed by (from_id, to_id).
     Returns None on any failure or missing API key; never raises."""
 ```
+
+Implemented in `backend/audio/mood.py`. One `claude-opus-5-5` call (low
+effort, structured JSON output) rates every ordered pair. Claude sees each
+song's filename plus BPM, key, length, melody share and section labels, and
+is told to judge mood only, since tempo, key and energy are scored
+separately. Results are cached per set of track ids, so `/order` with the
+same songs (or `keep_order`) doesn't call Claude again. Failures aren't
+cached. `/order` passes the result to `score_pairs`.
 
 ## Sahil: `backend/logic`
 
