@@ -26,8 +26,9 @@ function beatLabel(notes: string[], tempoChange: number | null) {
 /** Short pill label; the renderer's full description goes under "Engine notes". */
 function eqLabel(eq: string) {
   if (eq.startsWith("drop:")) {
-    return eq.includes("starts cold") ? "Roll → silence → drop" : "Filter sweep → roll → drop";
+    return eq.includes("starts cold") ? "Roll → silence → drop" : "Filter build → drop";
   }
+  if (/mids \(vocals\) swapped/i.test(eq)) return "Bass + vocal swap";
   if (/lows/i.test(eq) && /highs/i.test(eq)) return "Bass + hi-hat swap";
   const head = eq.split(":")[0].trim();
   return head.charAt(0).toUpperCase() + head.slice(1);

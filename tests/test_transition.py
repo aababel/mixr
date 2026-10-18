@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from backend.api.schemas import TransitionRequest
+from backend.audio.bands import MID_UNDER
 from backend.audio.transition import SafetyLimits, render_transition, seam_sample_bounds
 
 SR = 22050
@@ -161,11 +162,17 @@ def test_fade_shapes(style):
     m = seam.shape[0]
     rms = lambda x: float(np.sqrt(np.mean(x ** 2)))
     w = int(0.05 * SR)
-    assert rms(seam[:w]) == pytest.approx(0.5 / np.sqrt(2), rel=0.03)  # all outgoing
-    assert rms(seam[-w:]) == pytest.approx(0.5 / np.sqrt(2), rel=0.03)  # all incoming
-    # identical in-phase inputs: amplitude = fade_out + fade_in at the midpoint
+    # outgoing plus a hint of the incoming at MID_UNDER
+    assert rms(seam[:w]) == pytest.approx((1 + MID_UNDER) * 0.5 / np.sqrt(2), rel=0.03)
+    assert rms(seam[-w // 5:]) == pytest.approx(0.5 / np.sqrt(2), rel=0.03)  # all incoming
+    # identical in-phase inputs: amplitude = fade_out + fade_in. The mids cross
+    # over in the second half, so its middle (3/4 of the way) is the fade midpoint
     gain = np.sqrt(2) if style == "equal_power" else 1.0
-    assert rms(seam[m // 2 - w // 2:m // 2 + w // 2]) == pytest.approx(gain * 0.5 / np.sqrt(2), rel=0.03)
+    q = 3 * m // 4
+    assert rms(seam[q - w // 2:q + w // 2]) == pytest.approx(gain * 0.5 / np.sqrt(2), rel=0.03)
+    # before that: all outgoing plus a hint of the incoming at MID_UNDER
+    h = m // 4
+    assert rms(seam[h - w // 2:h + w // 2]) == pytest.approx((1 + MID_UNDER) * 0.5 / np.sqrt(2), rel=0.03)
 
 
 def test_limiter_fires_and_is_recorded():

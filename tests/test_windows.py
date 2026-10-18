@@ -161,7 +161,7 @@ def test_full_mode_judges_a_natural_end_before_its_fade_out():
 
 
 def test_windows_fall_back_to_bars_then_time():
-    a = make_track("a", phrases=False, melody=[(0, 192, 0.9), (150, 158, 0.1)])
+    a = make_track("a", phrases=False, melody=[(0, 192, 0.9), (172, 182, 0.1)])
     b = make_track("b", phrases=False, melody=[(0, 192, 0.9), (10, 30, 0.1)])
     wa, wb = choose_windows([a, b], [8.0])
     bars = {round(t, 3) for t in a.beats_seconds[::4]} | {0.0, 192.0}
@@ -169,7 +169,7 @@ def test_windows_fall_back_to_bars_then_time():
     assert wa.end_seconds < 192.0 and wb.start_seconds > 0.0
     assert "bar start" in wa.reason
 
-    c = make_track("c", beats=False, melody=[(0, 192, 0.9), (150, 158, 0.1)])
+    c = make_track("c", beats=False, melody=[(0, 192, 0.9), (172, 182, 0.1)])
     d = make_track("d", beats=False, melody=[(0, 192, 0.9), (10, 30, 0.1)])
     wc, wd = choose_windows([c, d], [8.0])
     for t in (wc.end_seconds, wd.start_seconds):
@@ -181,8 +181,11 @@ def test_poor_seam_says_it_is_the_least_bad_cue():
     a = make_track("a", melody=[(0, 192, 0.95)])
     b = make_track("b", melody=[(0, 192, 0.95)])
     wa, wb = choose_windows([a, b], [8.0])
-    assert "least-bad" in wa.reason and "echo out" in wa.reason
+    assert "least-bad" in wa.reason and "vocals swap on a beat" in wa.reason
     check_windows([a, b], [wa, wb])
+    b.bpm = 90.0  # too far from 120 to beat-match
+    wa, _ = choose_windows([a, b], [8.0])
+    assert "least-bad" in wa.reason and "echoes it out" in wa.reason
 
 
 @pytest.mark.parametrize("n,target", [(2, 180.0), (3, 300.0), (5, 450.0), (5, 600.0)])
@@ -262,7 +265,7 @@ def test_set_mode_enters_in_a_break_so_the_next_section_lands_as_a_leaves():
     assert "after the blend" in wb.reason
 
 
-def test_set_mode_lands_the_drop_after_a_break_as_a_leaves():
+def test_set_mode_blends_when_a_clean_handoff_exists_despite_a_drop():
     sections = [Section(start_seconds=0, end_seconds=96, energy=0.9),
                 Section(start_seconds=96, end_seconds=128, energy=0.4, label="break"),
                 Section(start_seconds=128, end_seconds=240, energy=1.0)]
@@ -270,9 +273,19 @@ def test_set_mode_lands_the_drop_after_a_break_as_a_leaves():
     b = make_track("b", duration=240.0, sections=sections,
                    melody=[(0, 240, 0.9), (96, 128, 0.2)], energy=[(96, 128, 0.4), (128, 176, 1.0)])
     wa, wb = choose_windows([a, b], [8.0], 200.0)
+    assert find_drops(b) == [(128.0, 1.0)]
+    assert wb.drop_seconds is None, "a long blend keeps the set flowing; the drop is a fallback"
+    check_windows([a, b], [wa, wb])
+
+
+def test_set_mode_lands_the_drop_when_every_blend_clashes():
+    a = make_track("a", duration=240.0, melody=[(0, 240, 0.95)])
+    b = make_track("b", duration=240.0, melody=[(0, 240, 0.95)],
+                   energy=[(0, 240, 0.9), (96, 128, 0.4), (128, 176, 1.0)])
+    wa, wb = choose_windows([a, b], [8.0], 200.0)
     assert wb.drop_seconds == 128.0
     assert wb.start_seconds == 120.0, "an 8 s build: 4 bars at 120 BPM"
-    assert "drop at 2:08" in wb.reason and "beat of silence" in wa.reason
+    assert "drop at 2:08" in wb.reason and "filtered up over b's build" in wa.reason
     check_windows([a, b], [wa, wb])
 
 
@@ -317,6 +330,12 @@ def _renderer_clash(a, wa, b, wb):
     return clash
 
 
+def _flags_clash(reason):
+    """The reason names the renderer's clash fix: a vocal swap when the tempos
+    blend, echo-out when they don't."""
+    return "echo" in reason or "vocals swap" in reason
+
+
 def test_echo_out_reason_uses_the_renderers_8_second_check():
     # Regression: with a 12 s overlap the old code averaged A's melody over the
     # last 12 s (0.47, under the 0.5 clash level) while echo.py checks only the
@@ -327,7 +346,7 @@ def test_echo_out_reason_uses_the_renderers_8_second_check():
     wa, wb = choose_windows([a, b], [12.0])
     assert (wa.start_seconds, wa.end_seconds, wb.start_seconds) == (0.0, 20.0, 0.0)
     assert _renderer_clash(a, wa, b, wb)
-    assert "echo" in wa.reason
+    assert _flags_clash(wa.reason)
 
 
 @pytest.mark.parametrize("overlap", [4.0, 8.0, 12.0, 16.0])
@@ -340,7 +359,7 @@ def test_echo_out_reason_always_matches_the_renderer(overlap, a_melody, b_melody
     a = make_track("a", melody=a_melody)
     b = make_track("b", melody=b_melody)
     wa, wb = choose_windows([a, b], [overlap])
-    assert ("echo" in wa.reason) == _renderer_clash(a, wa, b, wb), wa.reason
+    assert _flags_clash(wa.reason) == _renderer_clash(a, wa, b, wb), wa.reason
 
 
 def test_seam_weights_sum_to_one():
@@ -399,7 +418,7 @@ def test_stored_fade_moves_where_the_seam_is_judged():
     b = make_track("b", duration=20.0, melody=[(0, 20, 0.9)])
     a.metadata = {FADE_OUT_KEY: 10.0}
     wa, _ = choose_windows([a, b], [12.0])
-    assert "echo" not in wa.reason
+    assert not _flags_clash(wa.reason)
     a.metadata = {FADE_OUT_KEY: 0.0}
     wa, _ = choose_windows([a, b], [12.0])
-    assert "echo" in wa.reason
+    assert _flags_clash(wa.reason)

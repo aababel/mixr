@@ -20,9 +20,10 @@ Processing actually performed (and recorded in AppliedTransition):
      incoming head and finishes where the outgoing tail begins. The edges
      still play inside the seam, under the other track.
      Plan the seam from both beat lists (seam_plan.py):
-       - tempos within 14% (after half/double folding): match beats
-         beat-for-beat over a whole number of bars near the requested
-         length; if the grids would drift, glide the tempo (step 3)
+       - tempos within 22% (after half/double folding): match beats
+         beat-for-beat over a whole phrase (32 or 16 beats) near the
+         requested length, else a whole number of bars; if the grids would
+         drift, glide the tempo (step 3)
        - tempos further apart: short ~2-beat blend ending on an incoming
          beat, no warp
        - no steady beat grid: snap the first incoming beat onto an
@@ -33,28 +34,31 @@ Processing actually performed (and recorded in AppliedTransition):
      tempo_change = incoming/outgoing tempo ratio when a warp is applied.
   4. Per-track gain (outgoing_gain_db / incoming_gain_db, from loudness.py),
      the same gain mix.py applies to the rest of each track.
-  5. Split-frequency swap (bands.py) over the blend region: lows swap at its
-     midpoint, highs at ~30%, mids crossfade with fade_style. Recorded in
-     applied_eq.
+  5. Split-frequency swap (bands.py) over the blend region, landing on the
+     phrase boundary at its last matched beat: lows swap on that beat, highs
+     halfway, mids cross over in the second half with fade_style. Recorded
+     in applied_eq.
   6. Soft limiter on the seam only if its peak exceeds the threshold.
 
-Echo-out (echo.py): when melody data is passed and BOTH sides carry lead
-melody at the seam (outgoing's last 8 s, incoming's first 8 s), steps 2-5
-are replaced by an echo-out: A plays its last bar with the bass filtered
-out, its last beat echoes, and B drops on a downbeat at A's bar line.
-The requested overlap is not used, so both A/B previews are identical.
+Vocal clash: when melody data is passed and BOTH sides carry lead melody at
+the seam (outgoing's last 8 s, incoming's first 8 s), the blend's mids swap
+on a beat at the bass swap instead of crossfading (bands.py, mid_swap). If
+the beats can't be matched, steps 2-5 are replaced by an echo-out
+(echo.py): A plays its last bar with the bass filtered out, its last beat
+echoes, and B drops on a downbeat at A's bar line.
 
 Drop (drop.py): request.style == "drop" (choose_windows found a drop in the
 incoming song; requested_overlap_seconds is its build). The outgoing song is
-swept, rolled and silenced for a beat, and the incoming drop lands on a
-matched beat at full level. Takes precedence over echo-out.
+swept up to the incoming drop, which lands on a matched beat at full level;
+with tempos too far apart it is a cut with a roll and a beat of silence.
+Takes precedence over the vocal swap.
 """
 from dataclasses import dataclass
 
 import numpy as np
 
 from backend.api.schemas import AppliedTransition, RenderMode, TransitionRequest
-from backend.audio.bands import band_swap
+from backend.audio.bands import band_swap, mid_window
 from backend.audio.drop import DropPlan, plan_drop_cut, render_drop
 from backend.audio.echo import (
     MELODY_CLASH, last_bar_end, melody_clash, plan_echo_out, render_echo_out,
@@ -74,7 +78,7 @@ EDGE_BLEND_SECONDS = 0.010  # crossfade between untouched track and warped seam 
 @dataclass(frozen=True)
 class SafetyLimits:
     min_overlap_seconds: float = 1.0
-    max_overlap_seconds: float = 16.0
+    max_overlap_seconds: float = 32.0
     max_fraction_of_track: float = 0.5  # overlap may not exceed this share of either track
     limiter_threshold: float = 0.9  # seam peak above this triggers the soft limiter
 
@@ -423,18 +427,22 @@ def render_transition(
         notes.extend(plan.notes)
         changed_for_safety = False
         region = None
-    elif clash:
-        seam, plan, eq_desc = _echo_out(out, inc, sr, list(outgoing_beats_seconds),
-                                        list(incoming_beats_seconds), safety, g_out, g_in)
-        notes.extend(plan.notes)
-        notes.append(f"requested overlap not used: both sides have lead melody at the seam, "
-                     f"so the blend would play two melodies at once")
-        changed_for_safety = True
-        region = None
     else:
-        seam, plan, eq_desc, region = _blend(
-            out, inc, sr, outgoing_beats_seconds, incoming_beats_seconds, request,
-            clamped, lo, hi, notes, head, tail, hi_all, g_out, g_in)
+        blended = _blend(out, inc, sr, outgoing_beats_seconds, incoming_beats_seconds, request,
+                         clamped, lo, hi, notes, head, tail, hi_all, g_out, g_in, mid_swap=clash)
+        if blended is not None:
+            seam, plan, eq_desc, region = blended
+            if clash:
+                notes.append("both sides have lead melody at the seam: the vocals swap on a beat "
+                             "instead of crossfading, so two melodies are never loud together")
+        else:
+            seam, plan, eq_desc = _echo_out(out, inc, sr, list(outgoing_beats_seconds),
+                                            list(incoming_beats_seconds), safety, g_out, g_in)
+            notes.extend(plan.notes)
+            notes.append(f"requested overlap not used: both sides have lead melody at the seam "
+                         f"and the beats can't be matched for a vocal swap")
+            changed_for_safety = True
+            region = None
     o_start, in_cons, seam_len = plan.o_start, plan.in_consumed, plan.seam_len
 
     # 6. soft limiter, only when needed
@@ -534,11 +542,17 @@ def _drop(out, inc, sr, out_beats, in_beats, request, lo, hi, notes, g_out, g_in
 
 
 def _blend(out, inc, sr, outgoing_beats_seconds, incoming_beats_seconds, request,
-           clamped, lo, hi, notes, head, tail, hi_all, g_out, g_in):
-    """Normal beat-matched blend (steps 2-5): (seam, plan, eq description, region)."""
+           clamped, lo, hi, notes, head, tail, hi_all, g_out, g_in, mid_swap=False):
+    """Normal beat-matched blend (steps 2-5): (seam, plan, eq description, region).
+    mid_swap: both sides carry melody; None if both have beats that can't be
+    matched (a short or snapped plan)."""
+    plan_notes: list[str] = []
     plan = _plan_seam(out, inc, sr, list(outgoing_beats_seconds),
-                      list(incoming_beats_seconds), request, clamped, lo, hi, notes,
+                      list(incoming_beats_seconds), request, clamped, lo, hi, plan_notes,
                       head, tail, hi_all)
+    if mid_swap and plan.kind not in ("glide", "beat_matched", "plain"):
+        return None  # beats that don't line up: a long blend would trainwreck
+    notes.extend(plan_notes)
     notes.extend(plan.notes)
     o_start, in_cons, seam_len = plan.o_start, plan.in_consumed, plan.seam_len
 
@@ -565,10 +579,10 @@ def _blend(out, inc, sr, outgoing_beats_seconds, incoming_beats_seconds, request
         notes.append(f"time-warped with {engine_name()} time map")
 
     # 4. per-track gain, 5. split-frequency swap with the mids crossfaded
-    fade_out, fade_in = _fades(seam_len, request.fade_style, region)
+    fade_out, fade_in = _fades(seam_len, request.fade_style, mid_window(seam_len, plan.beats, sr, region))
     blend, eq_desc = band_swap(out_seg * g_out, in_seg * g_in, sr, plan.beats, fade_out, fade_in,
-                               region)
-    eq_desc = eq_desc.replace("mids crossfaded", f"mids {request.fade_style} crossfade")
+                               region, mid_swap=mid_swap)
+    eq_desc = eq_desc.replace("mids crossed over", f"mids crossed over ({request.fade_style})")
     return blend.astype(np.float32), plan, eq_desc, region
 
 

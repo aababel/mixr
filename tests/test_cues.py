@@ -107,8 +107,17 @@ def seam(out_p, out_t, in_p, in_t, overlap, mode="final"):
     )
 
 
-def test_echo_out_when_both_sides_are_melodic(tmp_path):
+def test_vocal_swap_when_both_sides_are_melodic(tmp_path):
     (pa, a), (pb, b) = make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 20, 120, 2)
+    audio, t = seam(pa, a, pb, b, 6.0)
+    assert t.applied_eq.startswith("3-band swap") and "mids (vocals) swapped" in t.applied_eq
+    assert any("vocals swap on a beat" in n for n in t.safety_adjustments)
+    assert not t.overlap_changed_for_safety
+    assert np.isfinite(audio).all() and np.abs(audio).max() <= 1.0
+
+
+def test_echo_out_when_both_sides_are_melodic_and_tempos_dont_match(tmp_path):
+    (pa, a), (pb, b) = make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 20, 90, 2)
     audio, t = seam(pa, a, pb, b, 6.0)
     assert t.applied_eq.startswith("echo-out")
     assert t.overlap_changed_for_safety
@@ -124,7 +133,7 @@ def test_echo_out_when_both_sides_are_melodic(tmp_path):
 
 
 def test_echo_out_ab_previews_are_identical(tmp_path):
-    (pa, a), (pb, b) = make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 20, 120, 2)
+    (pa, a), (pb, b) = make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 20, 90, 2)
     a2, ta = seam(pa, a, pb, b, 2.0, "preview")
     b2, tb = seam(pa, a, pb, b, 8.0, "preview")
     assert ta.actual_overlap_seconds == tb.actual_overlap_seconds
@@ -140,7 +149,7 @@ def test_blend_when_one_side_is_instrumental(tmp_path):
 
 
 def test_mix_with_echo_out_keeps_every_sample(tmp_path):
-    files = [make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 25, 120, 2), make(tmp_path, "c", 18, 120, 3)]
+    files = [make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 25, 90, 2), make(tmp_path, "c", 18, 120, 3)]
     paths, tracks = [p for p, _ in files], [t for _, t in files]
     out = tmp_path / "mix.wav"
     m = render_mix("m", tracks, paths, [4.0, 6.0], out, loudness_match=False)

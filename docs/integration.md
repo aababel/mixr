@@ -88,12 +88,21 @@ Routes need no change. Every seam (A/B previews and the final mix) now:
   other beat), so the 90-180 BPM fold in analysis only changes the number
   shown, never which seams match.
 - **Falls back to a short ~2-beat blend** ending on an incoming beat when the
-  tempos differ by more than 14% after half/double folding (e.g. 90 BPM rap
+  tempos differ by more than 22% after half/double folding (e.g. 90 BPM rap
   into 128 BPM house), or when Rubber Band is not installed. The requested
   overlap is not used there, so both A/B previews of such a seam are the same
   length.
-- **Swaps frequency bands**: lows (<200 Hz) at the midpoint, highs (>5 kHz)
-  at ~30%, mids crossfade with `fade_style`. Described in `applied_eq`.
+- **Swaps frequency bands, landing on the phrase**: the blend resolves on its
+  last matched beat, the phrase boundary in both songs. Lows (<200 Hz) swap
+  on that beat, highs (>5 kHz) halfway, and mids cross over in the second
+  half with `fade_style`; before that the incoming mids sit at -14 dB. So the
+  incoming song builds under the outgoing one and its next phrase hits as
+  the outgoing one leaves. Described in `applied_eq`.
+- **Picks entries for the landing** (`choose_windows`): B's handoff is judged
+  on the second half of the blend (what is heard), payoff adds B's energy
+  jump on the landing beat, and set mode counts B's best section as kept
+  from the landing, so B comes in one phrase before its chorus or drop
+  instead of burying it under A.
 - **Blends around fades** (`edges.py`): when the outgoing song ends with a
   fade to silence (most JJTBEATZ remixes: 2-8 s) or the incoming one starts
   with a fade-in, the seam is lengthened by the fade and the crossfade and
@@ -101,9 +110,14 @@ Routes need no change. Every seam (A/B previews and the final mix) now:
   begins (starting after the incoming fade-in). The fade still plays inside
   the seam, under the other track. Noted in `safety_adjustments` ("outgoing
   fades out over its last ...") and `applied_eq` ("over a-b s of the n s
-  seam"). Fades under 1 s are ignored, fades over 12 s are capped. The 16 s
-  overlap limit applies to the blend; the whole seam may be up to 16 s plus
+  seam"). Fades under 1 s are ignored, fades over 12 s are capped. The 32 s
+  overlap limit applies to the blend; the whole seam may be up to 32 s plus
   the fades, and never more than half of either track.
+- **Blends whole phrases**: Tune compares 8 s and 24 s blends (16 s when
+  skipped). A matched blend is 32 beats (an 8-bar phrase) when that is
+  within 0.8-1.3x the requested length, else 16 beats (0.7-1.35x), else the
+  nearest whole bar count. Window edges sit on phrase starts, so whole-phrase
+  blends keep both songs' phrases changing together.
 
 Field meanings with a glide (no schema change):
 
@@ -272,10 +286,16 @@ the position in the source track.
   verse from a break reliably.
 - Cue analysis adds about 5-10 s per song. If it fails, the track still
   analyzes; the three fields stay empty and a note says why.
-- **Echo-out** (`echo.py`), in every seam, preview and final, in both modes:
-  when both songs carry melody at the seam (mean `melody_activity` of A's
-  last 8 s and of B's first 8 s both >= 0.5, measured outside any fade-out
-  tail / fade-in head), the seam is not a blend. A plays its last bar with
+- **Vocal swap** (`bands.py`), in every seam, preview and final, in both
+  modes: when both songs carry melody at the seam (mean `melody_activity` of
+  A's last 8 s and of B's first 8 s both >= 0.5, measured outside any
+  fade-out tail / fade-in head) and the beats match (or neither song has a
+  beat), the blend's mids swap over one beat ending on the bass swap, with
+  B's mids at -14 dB before it, so two vocals are never loud together.
+  Recorded as `applied_eq` containing `"mids (vocals) swapped"` and a note
+  `"both sides have lead melody at the seam: ..."`.
+- **Echo-out** (`echo.py`): the same clash when both songs have beats that
+  can't be matched (tempos over 22% apart). A plays its last bar with
   its lows ramped out, its last beat echoes 4 times on a 1-beat delay
   (high-passed at 300 Hz, -6 dB per repeat), and B starts so its first beat
   lands on A's last bar line (or right at the bar line if B has more than a
@@ -345,32 +365,44 @@ How the implementation decides (constants at the top of the module):
   or start is judged past its fade-out / quiet lead-in (from `energy_rms`),
   where `transition.py` actually places the blend.
 - Melody and energy are measured over the overlap, or over echo.py's 8 s
-  if that's longer. Seam quality = 0.35 handoff x groove + 0.15 groove +
-  0.20 flow + 0.10 payoff + 0.10 energy match + 0.10 structure.
+  if that's longer. Seam quality = 0.25 handoff x groove + 0.15 groove +
+  0.15 flow + 0.15 payoff + 0.05 energy match + 0.10 structure + 0.15
+  harmony.
   - Handoff penalizes both melodies at once most, then A still singing,
-    then B starting busy; a falling A line earns a bonus; both sides at
-    echo.py's clash level cost extra.
+    then B busy in the blend's second half (where its mids come up); a
+    falling A line earns a bonus; both sides at echo.py's clash level cost
+    extra.
+  - Harmony (`backend/audio/harmony.py`): mean chroma of A's last overlap
+    vs B's first, each centered on its own mean, cosine mapped to 0-1. The
+    route computes chroma from the audio (cached per file, ~1 s per song)
+    and passes it as `choose_windows(..., chroma=)`; without it the term is
+    a neutral 0.5. Reasons call out matches >= 0.75 and rubs < 0.4.
   - Groove: both songs near their normal loudness during the blend. It also
     scales the handoff, because quiet melody over a quiet blend is dead air
     (an outro running into a sparse intro), not a clean handoff.
   - Flow: seconds with no melody from either song across the seam, from A's
     last melodic moment to B's first. Up to 8 s is fine; 32 s scores 0. This
     stops a vocal ending from running into a long instrumental intro.
-  - Payoff: B's energy and melody in the 16 s right after the blend.
+  - Payoff: B's energy and melody in the 16 s right after the blend, plus
+    its energy jump on the landing beat (scored like a drop).
 - Drop transitions: a drop is a phrase start where the energy over the next
   8 s jumps (0.3 of the song's loudness = full strength) up to near full.
   For each drop of the incoming song, a build start a whole number of bars
-  (about the overlap, at most 14 s) before it is added as a candidate
-  start. A drop seam scores 0.45 + 0.35 x strength + 0.1 x A's energy as it
-  leaves + 0.1 x structure, and replaces the blend where it scores higher
-  (a strong drop beats even a clean blend). The incoming window then sets
+  (about the overlap, at most 24 s) before it is added as a candidate
+  start, usable only for the drop (a blend can't enter there). A drop seam
+  scores 0.2 + 0.25 x strength + 0.1 x A's energy as it leaves + 0.1 x
+  structure (at most ~0.65), and replaces the blend where it scores higher,
+  so it only takes over from weak blends: clean blends score 0.75-0.9.
+  Blends between tempos over 22% apart (which render as ~2-beat blends)
+  are scaled by 0.6. The incoming window then sets
   `drop_seconds`; mix.py and preview.py turn that into
   `TransitionRequest(style="drop", requested_overlap_seconds=build)`.
   backend/audio/drop.py renders it: the outgoing song gets a resonant
-  high-pass sweep (40 Hz to 1.8 kHz, with makeup gain), its last bar rolls
+  high-pass sweep (40 Hz to 1.8 kHz, with makeup gain) and the incoming drop
+  lands with full bass. With tempos close enough to glide, the build plays
+  under the sweep without its bass and the sweep runs right up to the drop
+  (layered, the beat never stops); otherwise the outgoing's last bar rolls
   (1, 1/2, 1/4, 1/8 beat), the beat before the drop is silent, and the
-  incoming drop lands with full bass. With tempos close enough to glide, the
-  build plays under the sweep without its bass (layered); otherwise the
   incoming song starts cold on its drop (cut). Both A/B previews of a drop
   seam sound the same, like echo-out.
 - Full mode: the first song starts at 0 and the last plays to its end; each
@@ -379,7 +411,9 @@ How the implementation decides (constants at the top of the module):
   its song.
 - Set mode: per-song target lengths split `target_seconds + sum(overlaps)`
   evenly (bounded by each song's length and the 45 s floor), cost = relative
-  length error + 0.3 x the part of the best section left out. The best
+  length error + 0.15 x the part of the best section left out (counted
+  from where the incoming blend lands), so a clearly better-matched pair
+  of parts can win over keeping the loudest section. The best
   section is a `chorus`/`drop` section if ever labeled, else the loudest
   30 s of `energy_rms` snapped out to the cue grid. Up to 4 passes re-aim
   the targets until the set is within 5% (10% is accepted).

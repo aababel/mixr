@@ -6,20 +6,18 @@ that drop (the build), and TrackWindow.drop_seconds marks it. The seam:
 
   * The outgoing song gets a resonant high-pass sweep (SWEEP_FROM_HZ up to
     SWEEP_TO_HZ, slow at first, fast at the end), so it thins out and rises.
-  * Its last bar before the drop rolls: beat 1 plays, then half-beat
-    repeats, then quarter and eighth repeats of it, accelerating.
-  * The beat before the drop is silence, apart from a short echo of the
-    roll's last slice.
   * The incoming drop then lands on the downbeat with full bass.
 
 layered (tempos close enough to beat-match): the incoming build plays under
-the sweep without its lows, rising to BUILD_LEVEL, and drops out for the
-silent beat. The seam is planned by seam_plan.py like a blend, so every beat
-lines up and the drop falls on a matched beat.
+the sweep without its lows, rising to BUILD_LEVEL, and the sweep runs right
+up to the drop, so the beat never stops. The seam is planned by seam_plan.py
+like a blend, so every beat lines up and the drop falls on a matched beat.
 
 cut (tempos too far apart): only the outgoing song plays in the seam, on its
-own beat grid, and the incoming song starts cold on its drop. Its build is
-skipped. This is the usual way to switch tempos.
+own beat grid. Its last bar before the drop rolls (beat 1, then half, quarter
+and eighth-beat repeats), the beat before the drop is silence apart from a
+short echo of the roll, and the incoming song starts cold on its drop. Its
+build is skipped. This is the usual way to switch tempos.
 """
 from dataclasses import dataclass
 
@@ -34,7 +32,7 @@ SWEEP_TO_HZ = 1800.0
 SWEEP_CURVE = 1.8  # cutoff fraction = progress ** this: stays low, then rises fast
 SWEEP_Q = 2.2  # resonance on the second section: the rising "wooo"
 SWEEP_BLOCK = 256  # samples per coefficient update
-SWEEP_MAKEUP = 2.0  # gain at the top of the sweep, so the build rises instead of fading
+SWEEP_MAKEUP = 1.5  # gain at the top of the sweep, so the build rises instead of fading
 BUILD_LEVEL = 0.85  # incoming build mids/highs reach this before the silent beat
 BUILD_CURVE = 1.3
 CUT_BARS = 2  # cut variant: outgoing bars processed before the drop
@@ -117,12 +115,13 @@ def render_drop(out_seg: np.ndarray, in_seg: np.ndarray, sr: int, plan: DropPlan
     p = max(1, int(round(plan.period * sr)))
     ch = out_seg.shape[1]
     edge = int(EDGE_FADE_SECONDS * sr)
-    gap = max(0, d - p)
+    # Layered, the beat never stops: the sweep runs right up to the drop.
+    gap = d if plan.layered else max(0, d - p)
 
     a = np.zeros((n, ch))
     m = min(n, out_seg.shape[0])
     a[:m] = out_seg[:m].astype(np.float64) * g_out
-    rolled = gap >= 3 * p
+    rolled = not plan.layered and gap >= 3 * p
     echo = None
     if rolled:
         a[gap - 3 * p:gap], echo = roll(a, gap - 3 * p, p, sr)
@@ -156,9 +155,10 @@ def render_drop(out_seg: np.ndarray, in_seg: np.ndarray, sr: int, plan: DropPlan
 
     desc = (f"drop: outgoing high-pass sweep {SWEEP_FROM_HZ:.0f} Hz -> {SWEEP_TO_HZ / 1000:.1f} kHz "
             f"over {gap / sr:.2f}s"
-            + (", last bar rolled (1, 1/2, 1/4, 1/8 beat)" if rolled else "")
-            + f", one beat of silence, incoming drop at {d / sr:.2f}s with full bass"
-            + ("; incoming build under the sweep without its bass" if plan.layered
+            + (", last bar rolled (1, 1/2, 1/4, 1/8 beat), one beat of silence" if rolled else "")
+            + f", incoming drop at {d / sr:.2f}s with full bass"
+            + ("; incoming build rises under the sweep without its bass, no break in the beat"
+               if plan.layered
                else "; incoming starts cold on its drop (tempos too far apart to layer)"))
     return seam.astype(np.float32), desc
 
