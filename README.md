@@ -9,9 +9,54 @@ Pipeline: Upload (3–5 MP3/WAV) → Analyze → Score → Order → optional A/
 ## Setup
 
 Requirements: Python 3.11 or 3.12 (not 3.13), Node 20+, FFmpeg, Rubber Band
-(`brew install rubberband` on macOS, `apt-get install rubberband-cli` on
-Debian/Ubuntu). Without Rubber Band the app still works, but seams between
+(see below). Without Rubber Band the app still works, but seams between
 tracks with different tempos fall back to a short 2-beat blend.
+
+### Rubber Band
+
+The `rubberband` command-line tool powers tempo glides between tracks. The
+app finds it on your `PATH`; v3 or newer is needed for the higher-quality
+`--fine` engine.
+
+**macOS**
+
+```bash
+brew install rubberband
+```
+
+**Debian / Ubuntu**
+
+```bash
+sudo apt-get install rubberband-cli
+```
+
+**Windows** (PowerShell). There's no winget package, so install the official
+prebuilt executable from [breakfastquay.com/rubberband](https://breakfastquay.com/rubberband/):
+
+```powershell
+$dest = "$env:LOCALAPPDATA\Programs\rubberband"
+Invoke-WebRequest https://breakfastquay.com/files/releases/rubberband-4.0.0-gpl-executable-windows.zip -OutFile "$env:TEMP\rubberband.zip"
+Expand-Archive "$env:TEMP\rubberband.zip" -DestinationPath "$env:TEMP\rubberband" -Force
+New-Item -ItemType Directory -Force $dest | Out-Null
+Copy-Item "$env:TEMP\rubberband\rubberband-4.0.0-gpl-executable-windows\*" $dest
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$dest", "User")
+```
+
+Keep `sndfile.dll` in the same folder as `rubberband.exe`; it needs it to read
+audio. The last line adds the folder to your user `PATH`, so open a **new**
+terminal afterwards.
+
+**Check it** (any OS, new terminal, from the repo root with the venv active):
+
+```bash
+rubberband --version             # 3.x or newer
+python -c "from backend.audio.stretch import rubberband_available; print(rubberband_available())"   # True
+```
+
+Without it, the glide tests in `tests/test_glide.py` are skipped, and two
+tests in `tests/test_mix.py` currently fail because they assume a tempo glide.
+
+### Backend
 
 ```bash
 python3.11 -m venv .venv
