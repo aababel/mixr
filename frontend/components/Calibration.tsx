@@ -8,6 +8,7 @@ import {
   previewCalibration,
   voteCalibration,
   type CalibrationTrial,
+  type MixOptions,
   type Preference,
   type Track,
   type VoteResult,
@@ -23,6 +24,7 @@ export default function Calibration({
   tracks,
   initialTrial,
   preference,
+  options,
   onPreference,
   onMix,
 }: {
@@ -30,6 +32,7 @@ export default function Calibration({
   tracks: Track[];
   initialTrial: CalibrationTrial;
   preference: Preference;
+  options: MixOptions;
   onPreference: (preference: Preference) => void;
   onMix: () => void;
 }) {
@@ -74,7 +77,7 @@ export default function Calibration({
     attempt(async () => {
       let next: CalibrationTrial;
       try {
-        next = await previewCalibration(orderedIds, trialIndex + 1, compared);
+        next = await previewCalibration(orderedIds, trialIndex + 1, compared, options);
       } catch (e) {
         if (e instanceof ApiError && e.status === 422) {
           setExhausted(true);

@@ -8,7 +8,7 @@ import random
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import soundfile as sf
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -44,6 +44,8 @@ MAX_TRACKS = 5
 MAX_FILE_BYTES = 50 * 1024 * 1024
 CHUNK_BYTES = 1024 * 1024
 MIN_AUDIBLE_OVERLAP_GAP_SECONDS = 2.0
+MIN_SET_SECONDS = 120.0
+MAX_SET_SECONDS = 1200.0
 
 _tracks: dict[str, Track] = {}
 _track_paths: dict[str, Path] = {}
@@ -89,13 +91,20 @@ class OrderResponse(BaseModel):
     explanation: OrderExplanation
 
 
-class MixRequest(BaseModel):
+class MixModeOptions(BaseModel):
+    """Full mode plays every song; set mode trims each to its best part (docs/integration.md)."""
+
+    mode: Literal["full", "set"] = "full"
+    target_seconds: Optional[float] = Field(None, ge=MIN_SET_SECONDS, le=MAX_SET_SECONDS)
+
+
+class MixRequest(MixModeOptions):
     ordered_track_ids: list[str]
     overlap_preference: float = Field(0.0, ge=-1.0, le=1.0)
     calibrated: bool = False
 
 
-class PreviewRequest(BaseModel):
+class PreviewRequest(MixModeOptions):
     ordered_track_ids: list[str]
     trial: int = Field(0, ge=0)
     # (from_id, to_id) seams already compared; they are never offered again.
@@ -242,6 +251,13 @@ def order(request: TrackIdsRequest):
     )
 
 
+def _require_supported_mode(options: MixModeOptions) -> None:
+    if options.mode == "set":
+        raise HTTPException(
+            501, "DJ set mode is on its way. For now, Mixr blends full songs."
+        )
+
+
 def _render_trial(outgoing: Track, incoming: Track) -> Trial:
     trial_id = uuid.uuid4().hex[:12]
     previews_dir = storage_dir() / "previews"
@@ -278,6 +294,7 @@ def _audible_gap(trial: Trial) -> float:
 
 @router.post("/calibration/preview", response_model=PreviewResponse)
 def calibration_preview(request: PreviewRequest):
+    _require_supported_mode(request)
     tracks = _distinct_tracks(request.ordered_track_ids, 2)
     excluded = set(request.exclude_pairs)
     seams = list(zip(tracks, tracks[1:]))
@@ -343,6 +360,7 @@ def calibration_vote(request: VoteRequest):
 
 @router.post("/mix", response_model=MixResponse)
 def mix(request: MixRequest):
+    _require_supported_mode(request)
     tracks = _distinct_tracks(request.ordered_track_ids, 2)
     overlap = recommended_overlap_seconds(request.overlap_preference)
 
