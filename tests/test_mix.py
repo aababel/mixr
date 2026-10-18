@@ -121,7 +121,9 @@ def test_preview_is_exact_excerpt_of_final_mix(tmp_path, three):
 
     ctx = round(PREVIEW_CONTEXT_SECONDS * SR)
     start = round(applied.outgoing_start_seconds * SR) - ctx
-    np.testing.assert_allclose(prev, mix[start:start + len(prev)], atol=Q)
+    # Same seam, played at the preview level: one recorded scalar, nothing else.
+    level = 10 ** (applied.applied_gain_db["preview_output"] / 20)
+    np.testing.assert_allclose(prev, mix[start:start + len(prev)] * level, atol=2 * Q)
 
 
 @needs_rb
@@ -139,6 +141,9 @@ def test_ab_previews_differ_only_in_overlap(tmp_path, three):
         "requested_overlap_seconds", "actual_overlap_seconds", "outgoing_start_seconds",
         "beat_alignment_adjustments_seconds", "output_duration_seconds", "safety_adjustments",
         "applied_eq",  # same 3-band method; swap times scale with the blend length
+        "applied_gain_db",  # only preview_output (A/B leveling) may differ
     }
+    assert {k: v for k, v in a["applied_gain_db"].items() if k != "preview_output"} == \
+        {k: v for k, v in b["applied_gain_db"].items() if k != "preview_output"}
     assert a["tempo_change"] == b["tempo_change"] and a["fade_style"] == b["fade_style"]
     assert b["actual_overlap_seconds"] - a["actual_overlap_seconds"] > 2.0
