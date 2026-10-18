@@ -181,13 +181,53 @@ def test_calibration_never_repeats_a_compared_pair(client):
     assert "No more song pairs" in res.json()["detail"]
 
 
-def test_set_mode_is_not_available_yet(client):
+def test_set_mode_mix_hits_the_target_length(client):
+    ids = client.post("/api/tracks", files=song_files(seconds=100.0)).json()["track_ids"]
+    client.post("/api/analyze", json={"track_ids": ids})
+    res = client.post(
+        "/api/mix", json={"ordered_track_ids": ids, "mode": "set", "target_seconds": 150}
+    )
+    assert res.status_code == 200, res.text
+    manifest = res.json()["manifest"]
+    assert manifest["mode"] == "set"
+    windows = manifest["windows"]
+    assert [w["track_id"] for w in windows] == ids
+    assert all(w["reason"] for w in windows)
+    assert all(0 <= w["start_seconds"] < w["end_seconds"] <= 100.0 for w in windows)
+    assert any(w["end_seconds"] - w["start_seconds"] < 100.0 for w in windows)
+    assert manifest["source_durations_seconds"] == pytest.approx(
+        [w["end_seconds"] - w["start_seconds"] for w in windows], abs=0.05
+    )
+    assert manifest["output_duration_seconds"] == pytest.approx(150, rel=0.15)
+
+
+def test_set_mode_defaults_to_90_seconds_per_song(client):
+    ids = client.post("/api/tracks", files=song_files(seconds=100.0)).json()["track_ids"]
+    res = client.post("/api/mix", json={"ordered_track_ids": ids[:2], "mode": "set"})
+    assert res.status_code == 200, res.text
+    manifest = res.json()["manifest"]
+    assert manifest["mode"] == "set"
+    assert manifest["output_duration_seconds"] == pytest.approx(180, rel=0.15)
+
+
+def test_set_mode_rejects_out_of_range_length(client):
     ids = upload(client)["track_ids"]
-    body = {"ordered_track_ids": ids, "mode": "set", "target_seconds": 300}
-    assert client.post("/api/mix", json=body).status_code == 501
-    assert client.post("/api/calibration/preview", json=body).status_code == 501
-    bad_length = {**body, "target_seconds": 30}
-    assert client.post("/api/mix", json=bad_length).status_code == 422
+    for seconds in (30, 5000):
+        body = {"ordered_track_ids": ids, "mode": "set", "target_seconds": seconds}
+        assert client.post("/api/mix", json=body).status_code == 422
+        assert client.post("/api/calibration/preview", json=body).status_code == 422
+
+
+def test_set_mode_preview_plays_the_windowed_seam(client):
+    ids = client.post("/api/tracks", files=song_files(seconds=100.0)).json()["track_ids"]
+    body = {"ordered_track_ids": ids, "mode": "set", "target_seconds": 150}
+    res = client.post("/api/calibration/preview", json=body)
+    assert res.status_code == 200, res.text
+    trial = res.json()
+    assert (trial["from_id"], trial["to_id"]) == (ids[0], ids[1])
+    audio = client.get(trial["a"]["audio_url"])
+    assert audio.status_code == 200
+    assert sf.info(io.BytesIO(audio.content)).duration > 0
 
 
 def test_calibration_rejects_songs_too_short_to_compare(client):
@@ -229,6 +269,11 @@ def test_full_pipeline(client):
     assert manifest["calibrated"] is True
     assert manifest["overlap_preference"] == 0.5
     assert len(manifest["transitions"]) == 2
+    # Full mode: tones have no melody to hand over, so every song plays whole.
+    assert manifest["mode"] == "full"
+    assert [(w["track_id"], w["start_seconds"], w["end_seconds"]) for w in manifest["windows"]] == [
+        (track_id, 0.0, pytest.approx(40.0)) for track_id in ordered
+    ]
 
     assert client.get(f"/api/mixes/{body['mix_id']}").json() == body
     audio = client.get(body["audio_url"])

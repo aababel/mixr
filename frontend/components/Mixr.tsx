@@ -118,8 +118,7 @@ export default function Mixr() {
     try {
       await Promise.all([action(), sleep(MIN_LOADING_MS)]);
     } catch (e) {
-      if (e instanceof ApiError && e.status === 501) setNotice({ label: "Coming soon", text: e.message });
-      else setError(e instanceof Error ? e.message : String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setJob(null);
     }

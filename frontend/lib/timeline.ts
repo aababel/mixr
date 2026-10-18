@@ -1,4 +1,4 @@
-import type { AppliedTransition, MixManifest } from "./api";
+import type { AppliedTransition, MixManifest, Track, TrackWindow } from "./api";
 
 export const TRACK_COLORS = ["#ff2bd6", "#8b5cf6", "#22d3ee", "#f59e0b", "#34d399"];
 
@@ -7,7 +7,8 @@ export const BLEND_PREROLL_SECONDS = 4;
 
 export const trackColor = (index: number) => TRACK_COLORS[index % TRACK_COLORS.length];
 
-export type Segment = { id: string; index: number; start: number; end: number };
+/** window: the part of the source song this segment plays (null = whole song). */
+export type Segment = { id: string; index: number; start: number; end: number; window: TrackWindow | null };
 export type Blend = { index: number; start: number; end: number; transition: AppliedTransition };
 
 /** Where each track and each blend sits on the mix timeline, in seconds. */
@@ -23,20 +24,37 @@ export function mixLayout(manifest: MixManifest) {
   let headStretch = 0;
   ids.forEach((id, i) => {
     const next = transitions[i];
+    const played = manifest.windows?.[i] ?? null;
     if (!next) {
-      segments.push({ id, index: i, start, end: Math.min(total, start + (durations[i] ?? 0) + headStretch) });
+      const end = Math.min(total, start + (durations[i] ?? 0) + headStretch);
+      segments.push({ id, index: i, start, end, window: played });
       return;
     }
-    // outgoing_start_seconds is measured from the start of the outgoing track.
+    // outgoing_start_seconds is measured from the start of the outgoing window
+    // (the track itself without windows), and durations are window lengths.
     const blendStart = start + next.outgoing_start_seconds + headStretch;
     const blendEnd = Math.min(total, blendStart + next.output_duration_seconds);
-    segments.push({ id, index: i, start, end: blendEnd });
+    segments.push({ id, index: i, start, end: blendEnd, window: played });
     blends.push({ index: i, start: blendStart, end: blendEnd, transition: next });
     start = blendStart;
     headStretch = next.output_duration_seconds - next.actual_overlap_seconds;
   });
 
   return { total, segments, blends };
+}
+
+/** True when a window cuts something off the song (not just float noise at its edges). */
+export function isTrimmed(window: TrackWindow | null, duration: number | undefined) {
+  if (!window) return false;
+  return window.start_seconds > 0.5 || (duration !== undefined && window.end_seconds < duration - 0.5);
+}
+
+/** The part of a track's RMS envelope its window plays. */
+export function playedEnergy(track: Track | undefined, window: TrackWindow | null) {
+  const energy = track?.energy_rms ?? [];
+  const hop = track?.energy_hop_seconds;
+  if (!window || !hop) return energy;
+  return energy.slice(Math.floor(window.start_seconds / hop), Math.ceil(window.end_seconds / hop));
 }
 
 /** Index of the track that is "on" at a given time (the incoming one during a blend). */
