@@ -1,9 +1,10 @@
 """A/B overlap calibration (owner: Sahil).
 
 The user hears the same seam with a short and a long overlap and picks one.
-Each vote nudges overlap_preference toward -1 (short) or +1 (long), and that
-preference sets the overlap requested for every seam in the final mix.
-Calibration is optional: p = 0.0 gives the default overlap.
+Each vote nudges overlap_preference toward -1 (short) or +1 (long). The mix
+picks each seam's blend length for its own pair of songs (windows.plan_windows);
+the preference leans every one of those choices longer or shorter.
+Calibration is optional: p = 0.0 leaves the choice to the songs.
 """
 import math
 
@@ -22,9 +23,18 @@ BASE_OVERLAP_SECONDS = (SHORT_OVERLAP_SECONDS + LONG_OVERLAP_SECONDS) / 2
 OVERLAP_RANGE_SECONDS = (LONG_OVERLAP_SECONDS - SHORT_OVERLAP_SECONDS) / 2
 
 
-def calibration_overlaps() -> tuple[float, float]:
+# The A/B pair for each transition length setting (windows.BLEND_SIZES), each
+# inside that setting's cap, so the trial compares lengths the mix can play.
+TRIAL_OVERLAPS = {
+    "auto": (SHORT_OVERLAP_SECONDS, LONG_OVERLAP_SECONDS),
+    "longer": (12.0, 36.0),
+    "extended": (24.0, 56.0),
+}
+
+
+def calibration_overlaps(transition_length: str = "auto") -> tuple[float, float]:
     """(short_seconds, long_seconds) to compare in an A/B trial."""
-    return SHORT_OVERLAP_SECONDS, LONG_OVERLAP_SECONDS
+    return TRIAL_OVERLAPS[transition_length]
 
 
 def update_preference(preference: Preference, vote: Vote) -> Preference:

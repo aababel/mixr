@@ -6,6 +6,7 @@ from backend.logic.explain import (
     NOT_ENOUGH_TRACKS,
     explain_order,
     explain_transition,
+    explain_user_order,
 )
 from backend.logic.ordering import order_tracks
 from backend.logic.scoring import harmonic_score, score_pairs, tempo_score
@@ -126,6 +127,21 @@ def test_summary_when_order_kept():
     result = explain_order(tracks, [score("a", "b", 0.75)], ["a", "b"], ["a", "b"])
     assert result.summary == "Kept your order: it already had the smoothest transitions (average score 75%)."
     assert len(result.transitions) == 1
+
+
+def test_summary_for_the_users_own_order():
+    tracks = [make_track(i) for i in "abc"]
+    scores = [score("a", "b", 0.2), score("b", "c", 0.4), score("b", "a", 0.9), score("a", "c", 0.7)]
+    mine = explain_user_order(tracks, scores, ["b", "a", "c"], ["a", "b", "c"])
+    assert mine.summary == "Your order: average score 30% (Mixr's pick scores 80%)."
+    assert [(t.from_id, t.to_id) for t in mine.transitions] == [("a", "b"), ("b", "c")]
+    same = explain_user_order(tracks, scores, ["b", "a", "c"], ["b", "a", "c"])
+    assert same.summary == "Your order is Mixr's pick too (average score 80%)."
+    tied = [score("b", "a", 0.9), score("a", "c", 0.7), score("c", "b", 0.9)]
+    tie = explain_user_order(tracks, tied, ["b", "a", "c"], ["a", "c", "b"])
+    assert tie.summary == "Your order flows as well as Mixr's pick (average score 80%)."
+    unscored = explain_user_order(tracks, [], ["a", "b", "c"], ["c", "b", "a"])
+    assert unscored.summary == NOT_ENOUGH_TRACKS
 
 
 def test_too_few_tracks_or_missing_scores():

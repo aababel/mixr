@@ -4,6 +4,8 @@ import pytest
 from backend.api.schemas import TransitionRequest
 from backend.audio.bands import MID_UNDER
 from backend.audio.transition import SafetyLimits, render_transition, seam_sample_bounds
+from backend.logic.windows import overlap_limits
+from backend.logic.windows import overlap_limits
 
 SR = 22050
 
@@ -140,6 +142,37 @@ def test_custom_safety_limits(pair):
     s = SafetyLimits(max_overlap_seconds=3.0)
     _, ap = render_transition(out, inc, SR, ob, ib, req(8.0), "final", safety=s)
     assert ap.actual_overlap_seconds <= 3.0 + 1e-9
+
+
+def test_raised_cap_renders_a_blend_past_32_s():
+    out, ob = click_track(150.0, 132, first_beat=0.25, seed=1)
+    inc, ib = click_track(150.0, 132, first_beat=0.4, seed=2)
+    s = SafetyLimits(max_overlap_seconds=60.0)
+    want = 128 * 60 / 132
+    seam, ap = render_transition(out, inc, SR, ob, ib, req(want), "final", safety=s)
+    assert 32.0 < ap.actual_overlap_seconds <= 60.0
+    assert ap.actual_overlap_seconds == pytest.approx(want, abs=2 * 60 / 132)  # beat snap moves it
+    assert seam.shape[0] >= int(32.0 * SR)
+
+
+def test_extended_limits_allow_blends_past_32_s():
+    out, ob = click_track(150.0, 120, first_beat=0.25, seed=1)
+    inc, ib = click_track(150.0, 120, first_beat=0.4, seed=2)
+    _, ap = render_transition(out, inc, SR, ob, ib, req(48.0), "final", safety=overlap_limits("extended"))
+    assert ap.actual_overlap_seconds > 32.0
+    assert ap.actual_overlap_seconds == pytest.approx(48.0, abs=1.0)
+    _, auto = render_transition(out, inc, SR, ob, ib, req(48.0), "final")
+    assert auto.actual_overlap_seconds <= 32.0 + 1e-6
+
+
+def test_extended_limits_allow_blends_past_32_s():
+    out, ob = click_track(150.0, 120, first_beat=0.25, seed=1)
+    inc, ib = click_track(150.0, 120, first_beat=0.4, seed=2)
+    _, ap = render_transition(out, inc, SR, ob, ib, req(48.0), "final", safety=overlap_limits("extended"))
+    assert ap.actual_overlap_seconds > 32.0
+    assert ap.actual_overlap_seconds == pytest.approx(48.0, abs=1.0)
+    _, auto = render_transition(out, inc, SR, ob, ib, req(48.0), "final")
+    assert auto.actual_overlap_seconds <= 32.0 + 1e-6
 
 
 def test_beat_snap_never_leaves_safe_range(pair):

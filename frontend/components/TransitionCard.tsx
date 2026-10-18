@@ -12,6 +12,8 @@ type Props = {
 };
 
 const GAIN_EPSILON_DB = 0.05;
+/** Auto's longest blend; anything past it came from the Longer/Extended setting. */
+const EXTENDED_BLEND_SECONDS = 32;
 
 /** How well the beats line up, read from the renderer's notes. */
 function beatLabel(notes: string[], tempoChange: number | null) {
@@ -83,7 +85,12 @@ export default function TransitionCard({ blend, from, to, onPlay }: Props) {
 
       <div className="flex flex-wrap gap-2">
         <Pill tone="neon">
-          {(blend.end - blend.start).toFixed(1)}s {t.applied_eq?.startsWith("drop:") ? "build" : "blend"}
+          {(blend.end - blend.start).toFixed(1)}s{" "}
+          {t.applied_eq?.startsWith("drop:")
+            ? "build"
+            : blend.end - blend.start > EXTENDED_BLEND_SECONDS
+              ? "extended blend"
+              : "blend"}
         </Pill>
         {beats && <Pill>{beats}</Pill>}
         {from?.bpm != null && to?.bpm != null && (
