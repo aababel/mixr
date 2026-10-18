@@ -13,7 +13,7 @@ from backend.api.schemas import AppliedTransition, Track, TrackWindow, Transitio
 from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.loudness import gain_notes, track_gain_for_path
 from backend.audio.transition import render_transition
-from backend.audio.windows import play, with_entry
+from backend.audio.windows import edge_fades_for_seam, play, with_entry
 
 PREVIEW_CONTEXT_SECONDS = 6.0
 
@@ -43,6 +43,7 @@ def render_preview(
     g_out = g_in = None
     if loudness_match:
         g_out, g_in = track_gain_for_path(outgoing_path), track_gain_for_path(incoming_path)
+    fades = edge_fades_for_seam(out_p, outgoing, in_p, incoming)
     audio, applied = render_transition(
         out_p.audio,
         in_p.audio,
@@ -57,6 +58,8 @@ def render_preview(
         outgoing_melody=out_p.melody,
         incoming_melody=in_p.melody,
         melody_hop_seconds=outgoing.energy_hop_seconds,
+        outgoing_fade_out_seconds=fades[0],
+        incoming_fade_in_seconds=fades[1],
     )
     if loudness_match:
         notes = gain_notes("outgoing", outgoing.id, g_out) + gain_notes("incoming", incoming.id, g_in)

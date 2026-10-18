@@ -17,6 +17,8 @@ Fields filled:
   phrase_starts_seconds   every 8 bars on the beat grid (cues.py); [] without beats
   sections                contiguous sections on phrase starts (cues.py); [] without beats
   metadata                key_name, key_confidence, intro/outro mean energy,
+                          fade_out_seconds / fade_in_seconds (edges.py, the same
+                          measurement the renderer uses at a song's real end/start),
                           analysis_sample_rate, notes
 """
 from pathlib import Path
@@ -26,6 +28,7 @@ import numpy as np
 
 from backend.api.schemas import Track
 from backend.audio.cues import analyze_cues
+from backend.audio.edges import fade_in_seconds, fade_out_seconds
 
 ANALYSIS_SR = 22050
 ENERGY_HOP_SECONDS = 0.5
@@ -158,6 +161,8 @@ def analyze_track(path: Path, track: Track) -> Track:
                 "outro_energy": round(float(np.mean(energy[-edge_blocks:])), 5),
                 "analysis_sample_rate": sr,
                 "decoded_duration_seconds": round(decoded_seconds, 3),
+                "fade_out_seconds": round(fade_out_seconds(y, sr), 3),
+                "fade_in_seconds": round(fade_in_seconds(y, sr), 3),
                 "analysis_notes": notes,
             }
         )
