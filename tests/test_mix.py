@@ -36,20 +36,27 @@ def test_mix_keeps_every_track_complete(tmp_path, three):
 
     mix, sr = sf.read(out, dtype="float32")
     src = [load_render_audio(p) for p in paths]
-    ov = [round(t.actual_overlap_seconds * SR) for t in m.transitions]
+    ov = [round(t.actual_overlap_seconds * SR) for t in m.transitions]  # incoming consumed
+    o_start = [round(t.outgoing_start_seconds * SR) for t in m.transitions]
+    seam = [round(t.output_duration_seconds * SR) for t in m.transitions]
 
     assert sr == SR and mix.shape[1] == 2
-    assert mix.shape[0] == sum(s.shape[0] for s in src) - sum(ov)
+    # every source sample is used once: each seam replaces the outgoing tail and incoming head
+    used = sum((s.shape[0] - o) + v for s, o, v in zip(src, o_start, ov))
+    assert mix.shape[0] == sum(s.shape[0] for s in src) - used + sum(seam)
     assert m.output_duration_seconds == pytest.approx(mix.shape[0] / SR)
     assert m.source_durations_seconds == pytest.approx([20, 25, 18])
 
     # Untouched stretches of each track appear verbatim, in order.
-    a_end = src[0].shape[0] - ov[0]
-    np.testing.assert_allclose(mix[:a_end], src[0][:a_end], atol=Q)
-    b_start = a_end + ov[0]
-    b_mid = src[1][ov[0]: src[1].shape[0] - ov[1]]
+    np.testing.assert_allclose(mix[:o_start[0]], src[0][:o_start[0]], atol=Q)
+    b_start = o_start[0] + seam[0]
+    b_mid = src[1][ov[0]:o_start[1]]
     np.testing.assert_allclose(mix[b_start:b_start + len(b_mid)], b_mid, atol=Q)
     np.testing.assert_allclose(mix[-(src[2].shape[0] - ov[1]):], src[2][ov[1]:], atol=Q)
+    # 120 -> 124 -> 128 BPM: both seams are tempo-glided
+    assert all(t.tempo_change is not None for t in m.transitions)
+    assert all(t.applied_eq and t.applied_eq.startswith("3-band swap") for t in m.transitions)
+    assert not any("no EQ or tempo change" in s for s in m.limitations)
 
 
 def test_mix_seams_match_shared_renderer(tmp_path, three):
@@ -126,5 +133,7 @@ def test_ab_previews_differ_only_in_overlap(tmp_path, three):
     assert differing <= {
         "requested_overlap_seconds", "actual_overlap_seconds", "outgoing_start_seconds",
         "beat_alignment_adjustments_seconds", "output_duration_seconds", "safety_adjustments",
+        "applied_eq",  # same 3-band method; swap times scale with the blend length
     }
+    assert a["tempo_change"] == b["tempo_change"] and a["fade_style"] == b["fade_style"]
     assert b["actual_overlap_seconds"] - a["actual_overlap_seconds"] > 2.0

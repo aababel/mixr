@@ -1,35 +1,35 @@
-import { trackColor } from "@/lib/timeline";
+import type { OrderExplanation as Explanation, Track } from "@/lib/api";
 
-/** "Why this order": summary line, then one "A → B: reasons (score N%)" line per transition. */
-export default function OrderExplanation({ lines }: { lines: string[] }) {
-  const [summary, ...transitions] = lines;
-  if (!summary) return null;
+const stripExtension = (filename: string) => filename.replace(/\.[^.]+$/, "");
+
+export default function OrderExplanation({
+  explanation,
+  tracks,
+}: {
+  explanation: Explanation;
+  tracks: Track[];
+}) {
+  const nameOf = new Map(tracks.map((t) => [t.id, stripExtension(t.filename)]));
 
   return (
-    <section className="glass animate-fade-up flex flex-col gap-3 rounded-2xl p-5">
-      <h3 className="text-xs tracking-widest text-neutral-400 uppercase">Why this order</h3>
-      <p className="font-medium text-neutral-100">{summary}</p>
-      {transitions.length > 0 && (
-        <ol className="flex flex-col gap-2 text-sm">
-          {transitions.map((line, i) => {
-            const split = line.indexOf(": ");
-            const pair = split === -1 ? null : line.slice(0, split);
-            const reasons = split === -1 ? line : line.slice(split + 2);
-            return (
-              <li key={line} className="flex gap-3">
-                <span
-                  className="mt-1.5 size-2 shrink-0 rounded-full"
-                  style={{ background: trackColor(i + 1) }}
-                  aria-hidden
-                />
-                <span className="text-neutral-400">
-                  {pair && <span className="text-neutral-200">{pair}: </span>}
-                  {reasons}
-                </span>
-              </li>
-            );
-          })}
-        </ol>
+    <section className="glass animate-fade-up flex flex-col gap-3 rounded-2xl p-4">
+      <h2 className="font-display text-neon text-sm font-semibold tracking-wide uppercase">
+        Why this order
+      </h2>
+      <p className="font-medium">{explanation.summary}</p>
+      {explanation.transitions.length > 0 && (
+        <ul className="flex flex-col gap-2 text-sm text-neutral-300">
+          {explanation.transitions.map((t) => (
+            <li key={`${t.from_id}-${t.to_id}`}>
+              <span className="font-medium text-neutral-100">
+                {nameOf.get(t.from_id) ?? t.from_id} → {nameOf.get(t.to_id) ?? t.to_id}
+              </span>
+              <span className="text-neutral-400">
+                : {t.reasons.join("; ")} (score {Math.round(t.score * 100)}%)
+              </span>
+            </li>
+          ))}
+        </ul>
       )}
     </section>
   );

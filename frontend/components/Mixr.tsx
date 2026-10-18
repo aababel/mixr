@@ -12,6 +12,7 @@ import {
   uploadTracks,
   type CalibrationTrial,
   type MixResult as Mix,
+  type OrderExplanation as Explanation,
   type Preference,
   type Track,
 } from "@/lib/api";
@@ -81,6 +82,7 @@ export default function Mixr() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [tracks, setTracks] = useState<Track[]>([]);
+  const [explanation, setExplanation] = useState<Explanation | null>(null);
   const [mixResult, setMixResult] = useState<Mix | null>(null);
   const [preference, setPreference] = useState<Preference>(NEUTRAL_PREFERENCE);
   const [firstTrial, setFirstTrial] = useState<CalibrationTrial | null>(null);
@@ -132,7 +134,7 @@ export default function Mixr() {
       const res = await orderTracks(trackIds);
       const byId = new Map(tracks.map((t) => [t.id, t]));
       setTracks(res.ordered_track_ids.map((id) => byId.get(id)!));
-      setExplanations(res.explanations);
+      setExplanation(res.explanation);
       setStage("ordered");
     });
 
@@ -151,6 +153,7 @@ export default function Mixr() {
   function reset() {
     setFiles([]);
     setTracks([]);
+    setExplanation(null);
     setMixResult(null);
     setPreference(NEUTRAL_PREFERENCE);
     setFirstTrial(null);
@@ -214,6 +217,9 @@ export default function Mixr() {
         </section>
       ) : (
         <section className="flex flex-col gap-4">
+          {stage === "ordered" && explanation && (
+            <OrderExplanation explanation={explanation} tracks={tracks} />
+          )}
           {stage === "mixed" && mixResult ? (
             <MixResult mix={mixResult} tracks={tracks} />
           ) : (

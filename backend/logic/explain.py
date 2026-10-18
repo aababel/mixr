@@ -2,9 +2,13 @@
 
 Every phrase is backed by something the code measured. A sub-score that
 wasn't computed (no key, no BPM, no Claude) is left out rather than guessed.
+
+Returned as structured data (summary + per-transition reasons) so the UI
+never has to parse strings; it looks up song names by track id itself.
 """
-from pathlib import Path
 from typing import Optional, Sequence
+
+from pydantic import BaseModel
 
 from backend.api.schemas import PairScore, Track
 from backend.logic.ordering import order_score
@@ -20,9 +24,20 @@ ENERGY_LOW = 0.5
 MOOD_GOOD = 0.7
 MOOD_POOR = 0.3
 
+NO_DATA_REASON = "not enough analysis data to compare"
+NOT_ENOUGH_TRACKS = "Not enough scored tracks to explain an order."
 
-def _name(track: Track) -> str:
-    return Path(track.filename).stem or track.id
+
+class TransitionExplanation(BaseModel):
+    from_id: str
+    to_id: str
+    reasons: list[str]  # never empty; NO_DATA_REASON when nothing was measured
+    score: float  # PairScore.total, 0..1
+
+
+class OrderExplanation(BaseModel):
+    summary: str
+    transitions: list[TransitionExplanation]  # in the chosen order
 
 
 def _key_reason(from_key: Optional[str], to_key: Optional[str]) -> Optional[str]:
@@ -75,7 +90,7 @@ def _mood_reason(mood: Optional[float]) -> Optional[str]:
     return None
 
 
-def explain_transition(outgoing: Track, incoming: Track, score: PairScore) -> str:
+def explain_transition(outgoing: Track, incoming: Track, score: PairScore) -> TransitionExplanation:
     reasons = [
         r
         for r in (
@@ -86,8 +101,12 @@ def explain_transition(outgoing: Track, incoming: Track, score: PairScore) -> st
         )
         if r
     ]
-    detail = "; ".join(reasons) if reasons else "not enough analysis data to compare"
-    return f"{_name(outgoing)} → {_name(incoming)}: {detail} (score {score.total:.0%})"
+    return TransitionExplanation(
+        from_id=outgoing.id,
+        to_id=incoming.id,
+        reasons=reasons or [NO_DATA_REASON],
+        score=score.total,
+    )
 
 
 def _average_flow(order: Sequence[str], matrix: dict[tuple[str, str], PairScore]) -> Optional[float]:
@@ -101,8 +120,8 @@ def explain_order(
     scores: list[PairScore],
     original_ids: list[str],
     ordered_ids: list[str],
-) -> list[str]:
-    """Summary line first, then one line per transition in the chosen order."""
+) -> OrderExplanation:
+    """A summary of the reorder plus one explanation per transition in the chosen order."""
     by_id = {t.id: t for t in tracks}
     matrix = {(s.from_id, s.to_id): s for s in scores}
     if (
@@ -110,11 +129,13 @@ def explain_order(
         or any(i not in by_id for i in ordered_ids)
         or any(p not in matrix for p in zip(ordered_ids, ordered_ids[1:]))
     ):
-        return ["Not enough scored tracks to explain an order."]
+        return OrderExplanation(summary=NOT_ENOUGH_TRACKS, transitions=[])
 
-    before = _average_flow(original_ids, matrix) if all(
-        p in matrix for p in zip(original_ids, original_ids[1:])
-    ) else None
+    # No "before" figure if the uploaded order has unscored pairs.
+    if all(p in matrix for p in zip(original_ids, original_ids[1:])):
+        before = _average_flow(original_ids, matrix)
+    else:
+        before = None
     after = _average_flow(ordered_ids, matrix)
 
     if list(ordered_ids) == list(original_ids):
@@ -124,7 +145,10 @@ def explain_order(
     else:
         summary = f"Reordered for smoother transitions (average score {after:.0%})."
 
-    lines = [summary]
-    for a, b in zip(ordered_ids, ordered_ids[1:]):
-        lines.append(explain_transition(by_id[a], by_id[b], matrix[(a, b)]))
-    return lines
+    return OrderExplanation(
+        summary=summary,
+        transitions=[
+            explain_transition(by_id[a], by_id[b], matrix[(a, b)])
+            for a, b in zip(ordered_ids, ordered_ids[1:])
+        ],
+    )
