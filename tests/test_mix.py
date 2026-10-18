@@ -7,6 +7,9 @@ from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.mix import render_mix
 from backend.audio.preview import PREVIEW_CONTEXT_SECONDS, render_preview
 from backend.audio.transition import render_transition
+from backend.audio.stretch import rubberband_available
+
+needs_rb = pytest.mark.skipif(not rubberband_available(), reason="rubberband CLI not installed")
 
 SR = RENDER_SR
 Q = 1.5 / 32768  # 16-bit output quantization tolerance
@@ -29,6 +32,7 @@ def three(tmp_path):
     return [make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 25, 124, 2), make(tmp_path, "c", 18, 128, 3)]
 
 
+@needs_rb
 def test_mix_keeps_every_track_complete(tmp_path, three):
     paths, tracks = [p for p, _ in three], [t for _, t in three]
     out = tmp_path / "mix.wav"
@@ -117,9 +121,12 @@ def test_preview_is_exact_excerpt_of_final_mix(tmp_path, three):
 
     ctx = round(PREVIEW_CONTEXT_SECONDS * SR)
     start = round(applied.outgoing_start_seconds * SR) - ctx
-    np.testing.assert_allclose(prev, mix[start:start + len(prev)], atol=Q)
+    # Same seam, played at the preview level: one recorded scalar, nothing else.
+    level = 10 ** (applied.applied_gain_db["preview_output"] / 20)
+    np.testing.assert_allclose(prev, mix[start:start + len(prev)] * level, atol=2 * Q)
 
 
+@needs_rb
 def test_ab_previews_differ_only_in_overlap(tmp_path, three):
     (pa, ta), (pb, tb), _ = three
     apps = [
@@ -134,6 +141,9 @@ def test_ab_previews_differ_only_in_overlap(tmp_path, three):
         "requested_overlap_seconds", "actual_overlap_seconds", "outgoing_start_seconds",
         "beat_alignment_adjustments_seconds", "output_duration_seconds", "safety_adjustments",
         "applied_eq",  # same 3-band method; swap times scale with the blend length
+        "applied_gain_db",  # only preview_output (A/B leveling) may differ
     }
+    assert {k: v for k, v in a["applied_gain_db"].items() if k != "preview_output"} == \
+        {k: v for k, v in b["applied_gain_db"].items() if k != "preview_output"}
     assert a["tempo_change"] == b["tempo_change"] and a["fade_style"] == b["fade_style"]
     assert b["actual_overlap_seconds"] - a["actual_overlap_seconds"] > 2.0

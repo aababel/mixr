@@ -63,7 +63,7 @@ from backend.audio.drop import DropPlan, plan_drop_cut, render_drop
 from backend.audio.echo import (
     MELODY_CLASH, last_bar_end, melody_clash, plan_echo_out, render_echo_out,
 )
-from backend.audio.edges import fade_in_seconds, fade_out_seconds
+from backend.audio.edges import MAX_EDGE_SECONDS, fade_in_seconds, fade_out_seconds
 from backend.audio.seam_plan import (
     GRID_WINDOW_MARGIN_SECONDS, MAX_GLIDE_DEVIATION, SeamPlan, beat_period, deviation,
     fit_grid, fold_ratio, kick_grid, plan_matched, plan_short,
@@ -351,6 +351,8 @@ def render_transition(
     outgoing_melody: list[float] | None = None,
     incoming_melody: list[float] | None = None,
     melody_hop_seconds: float | None = None,
+    outgoing_fade_out_seconds: float | None = None,
+    incoming_fade_in_seconds: float | None = None,
 ) -> tuple[np.ndarray, AppliedTransition]:
     """Render the seam between two tracks.
 
@@ -370,6 +372,11 @@ def render_transition(
     (already sliced to the played window), on a melody_hop_seconds grid.
     When both edges are melodic the seam is an echo-out (echo.py). Leave
     them None to never echo out.
+
+    outgoing_fade_out_seconds / incoming_fade_in_seconds: fade lengths stored
+    by analysis (track.metadata) for a side that plays to its real end / from
+    its real start, so the renderer and choose_windows use the identical
+    value. None = measure from the audio here (edges.py), as before.
 
     In the result, actual_overlap_seconds is how much of the INCOMING track
     plays inside the seam (what mix.py skips afterwards). With a tempo glide
@@ -401,8 +408,12 @@ def render_transition(
         )
 
     # 2. fade edges, then plan: beat matching, tempo glide or short blend
-    tail = fade_out_seconds(out, sr) if request.beat_align else 0.0
-    head = fade_in_seconds(inc, sr) if request.beat_align else 0.0
+    tail = head = 0.0
+    if request.beat_align:
+        tail = (_stored_edge(outgoing_fade_out_seconds, out_dur)
+                if outgoing_fade_out_seconds is not None else fade_out_seconds(out, sr))
+        head = (_stored_edge(incoming_fade_in_seconds, in_dur)
+                if incoming_fade_in_seconds is not None else fade_in_seconds(inc, sr))
     hi_all = _seam_cap(out_dur, in_dur, head + tail, safety)
     if head + tail > 0 and hi_all - (head + tail) < lo:
         notes.append(f"fade edges ignored (outgoing tail {tail:.2f}s, incoming head {head:.2f}s): "
@@ -486,6 +497,11 @@ def render_transition(
         output_duration_seconds=audio.shape[0] / sr,
     )
     return audio, applied
+
+
+def _stored_edge(seconds: float, dur: float) -> float:
+    """A fade length from analysis, kept inside what edges.py could return."""
+    return float(min(max(0.0, seconds), MAX_EDGE_SECONDS, dur))
 
 
 def _echo_out(out, inc, sr, out_beats, in_beats, safety, g_out, g_in):

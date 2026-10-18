@@ -10,6 +10,9 @@ from backend.audio.mix import render_mix
 from backend.audio.preview import render_preview
 from backend.audio.transition import render_transition
 from backend.audio.windows import check_windows
+from backend.audio.stretch import rubberband_available
+
+needs_rb = pytest.mark.skipif(not rubberband_available(), reason="rubberband CLI not installed")
 
 SR = RENDER_SR
 Q = 1.5 / 32768
@@ -107,6 +110,7 @@ def seam(out_p, out_t, in_p, in_t, overlap, mode="final"):
     )
 
 
+@needs_rb
 def test_vocal_swap_when_both_sides_are_melodic(tmp_path):
     (pa, a), (pb, b) = make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 20, 120, 2)
     audio, t = seam(pa, a, pb, b, 6.0)
@@ -220,7 +224,8 @@ def test_preview_uses_the_windows(tmp_path):
     got, _ = sf.read(out, dtype="float32")
     assert t.outgoing_start_seconds == pytest.approx(te.outgoing_start_seconds)
     assert t.actual_overlap_seconds == pytest.approx(te.actual_overlap_seconds)
-    np.testing.assert_allclose(got, np.clip(expected, -1, 1), atol=Q)
+    level = 10 ** (t.applied_gain_db["preview_output"] / 20)
+    np.testing.assert_allclose(got, np.clip(expected, -1, 1) * level, atol=2 * Q)
 
 
 def test_bad_windows_are_rejected():
@@ -311,3 +316,41 @@ def test_flat_song_gets_no_chorus_or_drop(tmp_path):
                                 sample_rate=22050))
     assert len(tr.sections) >= 3  # 64 bars can't be one section any more
     assert not any(s.label in ("chorus", "drop") for s in tr.sections)
+
+
+# ---------------------------------------------------------------- stored fade edges
+
+def test_analysis_stores_fade_lengths(tmp_path):
+    y, _, dur = drums_then_melody(intro_bars=8, melody_bars=8)
+    n = int(6.0 * 22050)
+    y = y.copy()
+    y[-n:] *= np.linspace(1.0, 0.0, n, dtype=np.float32) ** 2  # 6 s fade to silence
+    p = tmp_path / "fade.wav"
+    sf.write(p, y, 22050)
+    tr = analyze_track(p, Track(id="f", filename="fade.wav", duration_seconds=dur, sample_rate=22050))
+    # exactly what edges.py (the renderer's measurement) reads on the same audio
+    from backend.audio.edges import fade_in_seconds, fade_out_seconds
+    assert tr.metadata["fade_out_seconds"] == pytest.approx(round(fade_out_seconds(y, 22050), 3))
+    assert 3.0 < tr.metadata["fade_out_seconds"] <= 6.0
+    assert tr.metadata["fade_in_seconds"] == pytest.approx(round(fade_in_seconds(y, 22050), 3))
+
+
+def _fade_note(applied):
+    return next((n for n in applied.safety_adjustments if "fades out over its last" in n), None)
+
+
+def test_renderer_uses_stored_fade_at_real_end_only(tmp_path):
+    (pa, a), (pb, b) = make(tmp_path, "a", 30, 120, 1, 0.1), make(tmp_path, "b", 30, 120, 2, 0.1)
+    a.metadata.update({"fade_out_seconds": 2.0, "fade_in_seconds": 0.0})  # no real fade in the audio
+    req = TransitionRequest(from_id="a", to_id="b", requested_overlap_seconds=4.0)
+
+    t_full = render_preview(pa, pb, a, b, req, tmp_path / "full.wav", loudness_match=False)
+    assert "last 2.00s" in _fade_note(t_full)  # stored value used: A plays to its real end
+
+    cut = TrackWindow(track_id="a", start_seconds=0.0, end_seconds=24.0)
+    t_cut = render_preview(pa, pb, a, b, req, tmp_path / "cut.wav", loudness_match=False,
+                           outgoing_window=cut)
+    assert _fade_note(t_cut) is None  # window cut A: measured from the audio (no fade there)
+
+    m = render_mix("m", [a, b], [pa, pb], [4.0], tmp_path / "m.wav", loudness_match=False)
+    assert "last 2.00s" in _fade_note(m.transitions[0])  # mix and preview agree
