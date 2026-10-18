@@ -13,7 +13,7 @@ from backend.api.schemas import AppliedTransition, Track, TrackWindow, Transitio
 from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.loudness import gain_notes, track_gain_for_path
 from backend.audio.transition import render_transition
-from backend.audio.windows import play
+from backend.audio.windows import play, with_entry
 
 PREVIEW_CONTEXT_SECONDS = 6.0
 
@@ -49,7 +49,7 @@ def render_preview(
         RENDER_SR,
         out_p.beats,
         in_p.beats,
-        request,
+        with_entry(request, in_p.window if incoming_window else None),
         "preview",
         PREVIEW_CONTEXT_SECONDS,
         outgoing_gain_db=g_out.gain_db if g_out else 0.0,

@@ -61,6 +61,8 @@ export type TrackWindow = {
   start_seconds: number;
   end_seconds: number;
   reason: string | null;
+  /** Set when the song enters with a drop transition: its drop lands as the previous song leaves. */
+  drop_seconds?: number | null;
 };
 
 export type MixManifest = {

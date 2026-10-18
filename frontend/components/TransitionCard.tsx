@@ -17,6 +17,7 @@ const GAIN_EPSILON_DB = 0.05;
 function beatLabel(notes: string[], tempoChange: number | null) {
   const has = (text: string) => notes.some((n) => n.startsWith(text));
   if (has("beat alignment skipped")) return null;
+  if (has("drop (cut)")) return "Drop on the one";
   if (has("short blend")) return "Quick cut on the beat";
   if (has("beat grid too irregular")) return "First beat aligned";
   return tempoChange != null || has("beats matched") ? "Every beat locked" : "Beats aligned";
@@ -24,6 +25,9 @@ function beatLabel(notes: string[], tempoChange: number | null) {
 
 /** Short pill label; the renderer's full description goes under "Engine notes". */
 function eqLabel(eq: string) {
+  if (eq.startsWith("drop:")) {
+    return eq.includes("starts cold") ? "Roll → silence → drop" : "Filter sweep → roll → drop";
+  }
   if (/lows/i.test(eq) && /highs/i.test(eq)) return "Bass + hi-hat swap";
   const head = eq.split(":")[0].trim();
   return head.charAt(0).toUpperCase() + head.slice(1);
@@ -77,7 +81,9 @@ export default function TransitionCard({ blend, from, to, onPlay }: Props) {
       </div>
 
       <div className="flex flex-wrap gap-2">
-        <Pill tone="neon">{(blend.end - blend.start).toFixed(1)}s blend</Pill>
+        <Pill tone="neon">
+          {(blend.end - blend.start).toFixed(1)}s {t.applied_eq?.startsWith("drop:") ? "build" : "blend"}
+        </Pill>
         {beats && <Pill>{beats}</Pill>}
         {from?.bpm != null && to?.bpm != null && (
           <Pill>

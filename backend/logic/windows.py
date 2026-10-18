@@ -12,13 +12,21 @@ Every seam scores each (A end, B start) pair on
              its start. Measured over the overlap, or over the stretch
              echo.py checks if that's longer, so a clean cue here also means
              the renderer won't fall back to echo-out.
+  groove     the blend itself is full: both songs are near their normal
+             loudness while they overlap. Quiet melody alone also matches an
+             outro running into a sparse intro, which is dead air.
+  flow       no long stretch without melody across the seam: from A's last
+             melodic moment to B's first. Picking quiet-melody cues alone
+             can leave half a minute of instrumental intro after A's vocal.
+  payoff     B arrives: its energy and melody are up right after the blend,
+             so the hook lands as A leaves.
   energy     A's loudness at its end close to B's at its start.
   structure  leaving at a section boundary or the song's own ending,
              entering at the song's start, an intro or a break.
 
-and each window pays a length cost: full mode trims as little as possible,
-set mode sizes windows to hit target_seconds and keeps each song's best
-(loudest) section. A dynamic program picks the windows that maximize the
+and each window pays a length cost: full mode trims as little as possible
+(sparse stretches are cheap to lose), set mode sizes windows to hit
+target_seconds and keeps each song's best (loudest) section. A dynamic program picks the windows that maximize the
 summed seam quality minus the length costs over the whole running order, so
 a middle song's entry and exit are chosen together and never collide.
 """
@@ -36,10 +44,26 @@ from backend.audio.edges import MAX_EDGE_SECONDS, MIN_DROP_DB
 from backend.audio.windows import MIN_WINDOW_SECONDS
 
 # Seam quality. Melody handoff matters most; keep these summing to 1.0.
-WEIGHTS = {"handoff": 0.55, "energy": 0.25, "structure": 0.20}
+WEIGHTS = {"handoff": 0.35, "groove": 0.15, "flow": 0.20, "payoff": 0.10, "energy": 0.10,
+           "structure": 0.10}
 
-# A seam scoring below this is called out in the reason as the least-bad cue.
+# Energy (relative to the song's 95th percentile) that counts as fully playing.
+FULL_ENERGY = 0.7
+# How far past the blend B's payoff is measured.
+PAYOFF_SECONDS = 16.0
+# Below this groove the reason says the blend is sparse.
+SPARSE_GROOVE = 0.7
+# flow: seconds across a seam with no melody from either song. Up to
+# GAP_OK is breathing room; GAP_DEAD past that scores 0.
+GAP_OK_SECONDS = 8.0
+GAP_DEAD_SECONDS = 24.0
+GAP_CAP_SECONDS = 48.0
+MELODY_SMOOTH_SECONDS = 4.0  # melody "on" = this moving average >= QUIET_MELODY
+
+# A seam scoring below this, or with a handoff below POOR_HANDOFF, is called
+# out in the reason as the least-bad cue.
 POOR_SEAM = 0.5
+POOR_HANDOFF = 0.3
 
 # Stand-in for a sub-score whose inputs are missing.
 NEUTRAL = 0.5
@@ -53,9 +77,11 @@ QUIET_MELODY = 0.35
 BUSY_MELODY = 0.55
 
 # Full mode: each trimmed second costs this much seam quality, and no edge
-# loses more than this fraction of its song.
-FULL_TRIM_COST_PER_SECOND = 0.004
+# loses more than this fraction of its song. A sparse second (energy under
+# FULL_ENERGY) costs proportionally less, down to SPARSE_TRIM_WEIGHT.
+FULL_TRIM_COST_PER_SECOND = 0.003
 FULL_MAX_TRIM_FRACTION = 0.3
+SPARSE_TRIM_WEIGHT = 0.2
 
 # Set mode.
 SET_MIN_WINDOW_SECONDS = 45.0
@@ -81,6 +107,22 @@ BOUNDARY_SECONDS = 0.5
 
 GRID_NAMES = {"phrase": "phrase", "bar": "bar", "time": ""}
 
+# Drop transitions (backend/audio/drop.py). A drop is a phrase start where
+# the energy over the next DROP_LOOK_SECONDS jumps by DROP_JUMP (full
+# strength) over the DROP_LOOK_SECONDS before, up to at least DROP_LEVEL.
+DROP_LOOK_SECONDS = 8.0
+DROP_JUMP = 0.3
+DROP_LEVEL = 0.85
+DROP_MIN_STRENGTH = 0.4
+# The incoming build before its drop: the overlap rounded to whole bars.
+BUILD_MIN_BARS = 2
+BUILD_MAX_SECONDS = 14.0
+# Drop seam quality = DROP_BASE + DROP_STRENGTH_WEIGHT * strength
+# + 0.1 x A's energy as it leaves + 0.1 x how natural leaving A there is.
+# A strong drop beats even a clean blend; a middling one only an awkward one.
+DROP_BASE = 0.45
+DROP_STRENGTH_WEIGHT = 0.35
+
 
 @dataclass
 class _Cues:
@@ -97,6 +139,15 @@ class _Cues:
     def duration(self) -> float:
         return self.track.duration_seconds
 
+    def content(self, t: np.ndarray) -> np.ndarray:
+        """Seconds of music from 0 to t, a sparse second counting as less."""
+        if self.energy is None or not self.hop:
+            return np.asarray(t, dtype=np.float64)
+        weight = np.clip(self.energy / FULL_ENERGY, SPARSE_TRIM_WEIGHT, 1.0)
+        cum = np.concatenate([[0.0], np.cumsum(weight) * self.hop])
+        times = np.arange(cum.size) * self.hop
+        return np.interp(t, times, cum)
+
     @property
     def name(self) -> str:
         stem = Path(self.track.filename).stem
@@ -107,7 +158,11 @@ class _Cues:
 class _Seam:
     quality: np.ndarray  # (len(A ends), len(B starts))
     handoff: np.ndarray
+    groove: np.ndarray
     energy: np.ndarray
+    in_payoff: np.ndarray  # B's melody right after the blend
+    gap: np.ndarray  # seconds with no melody from either song across the seam
+    in_quiet: np.ndarray  # seconds from B's start until its melody is on
     out_level: np.ndarray
     out_first: np.ndarray
     out_last: np.ndarray
@@ -115,6 +170,49 @@ class _Seam:
     in_level: np.ndarray
     in_full: np.ndarray
     span: float
+    is_drop: np.ndarray  # (A ends, B starts): the drop transition beats the blend here
+    drop_at: dict  # B start time -> (its drop time, strength)
+
+
+def find_drops(track: Track) -> list[tuple[float, float]]:
+    """(time, strength 0-1) of the song's drops: phrase starts where the
+    energy jumps up to near full. [] without phrases or energy."""
+    hop = track.energy_hop_seconds
+    if not track.phrase_starts_seconds or not track.energy_rms or not hop:
+        return []
+    energy = np.asarray(track.energy_rms, dtype=np.float64)
+    ref = float(np.percentile(energy, 95))
+    if ref <= 0:
+        return []
+    energy = np.clip(energy / ref, 0.0, 1.0)
+    out = []
+    for t in track.phrase_starts_seconds:
+        if t < DROP_LOOK_SECONDS or t > track.duration_seconds - DROP_LOOK_SECONDS:
+            continue
+        before = _mean(energy, hop, t - DROP_LOOK_SECONDS, t)
+        after = _mean(energy, hop, t, t + DROP_LOOK_SECONDS)
+        strength = (np.clip((after - before) / DROP_JUMP, 0.0, 1.0)
+                    * np.clip(after / DROP_LEVEL, 0.0, 1.0))
+        if strength >= DROP_MIN_STRENGTH:
+            out.append((float(t), round(float(strength), 3)))
+    return out
+
+
+def _build_starts(track: Track, overlap: float) -> dict:
+    """Build start -> (drop time, strength) for every drop of the song: the
+    beat a whole number of bars (about `overlap`) before it."""
+    beats = np.asarray(track.beats_seconds, dtype=np.float64)
+    if beats.size < 2 or not track.bpm:
+        return {}
+    bar = BEATS_PER_BAR * 60.0 / track.bpm
+    bars = int(np.clip(round(overlap / bar), BUILD_MIN_BARS, max(BUILD_MIN_BARS, BUILD_MAX_SECONDS // bar)))
+    starts = {}
+    for t, strength in find_drops(track):
+        i = int(np.argmin(np.abs(beats - t)))
+        j = i - bars * BEATS_PER_BAR
+        if j >= 0 and beats[j] > EDGE_SNAP_SECONDS:
+            starts[round(float(beats[j]), 3)] = (round(float(beats[i]), 3), strength)
+    return starts
 
 
 def _series(values: Sequence[float], hop: Optional[float]) -> Optional[np.ndarray]:
@@ -233,7 +331,24 @@ def _nan_to(arr: np.ndarray, value: float) -> np.ndarray:
     return np.where(np.isnan(arr), value, arr)
 
 
-def _score_seam(a: _Cues, b: _Cues, overlap: float) -> _Seam:
+def _quiet_run(c: _Cues, t: float, forward: bool) -> float:
+    """Seconds from t until the song's melody is on (forward), or since it
+    was last on (backward), capped at GAP_CAP_SECONDS. 0 without data."""
+    if c.melody is None or not c.hop:
+        return 0.0
+    n = max(1, int(round(MELODY_SMOOTH_SECONDS / c.hop)))
+    i = int(t / c.hop)
+    cap = int(GAP_CAP_SECONDS / c.hop)
+    # Only the side of t that plays: B from its start on, A up to its end.
+    seg = c.melody[i:i + cap] if forward else c.melody[max(0, i - cap):i][::-1]
+    if not seg.size:
+        return 0.0
+    hits = np.flatnonzero(np.convolve(seg, np.ones(n) / n, mode="same") >= QUIET_MELODY)
+    return float((hits[0] if hits.size else seg.size) * c.hop)
+
+
+def _score_seam(a: _Cues, b: _Cues, overlap: float, drop_at: Optional[dict] = None) -> _Seam:
+    drop_at = drop_at or {}
     span = max(overlap, CLASH_SECONDS)
     # Where the blend sits: before A's fade-out tail at its own end, after
     # B's lead-in at its own start.
@@ -263,14 +378,44 @@ def _score_seam(a: _Cues, b: _Cues, overlap: float) -> _Seam:
     e_in = np.array([_mean(b.energy, b.hop, s, s + span) for s in starts])
     energy = _nan_to(1.0 - np.abs(e_out[:, None] - e_in[None, :]), NEUTRAL)
 
+    x, y = e_out[:, None], e_in[None, :]
+    groove = _nan_to(np.clip((0.6 * (x + y) / 2 + 0.4 * np.minimum(x, y)) / FULL_ENERGY, 0.0, 1.0),
+                     NEUTRAL)
+
+    after = [(s + span, s + span + PAYOFF_SECONDS) for s in starts]
+    in_payoff = np.array([_mean(b.melody, b.hop, t0, t1) for t0, t1 in after])
+    e_after = np.array([_mean(b.energy, b.hop, t0, t1) for t0, t1 in after])
+    payoff = _nan_to(0.5 * np.clip(e_after / FULL_ENERGY, 0.0, 1.0) + 0.5 * in_payoff, NEUTRAL)
+
+    # Seam timeline with A's blend end at 0: A's melody last sounds at
+    # -out_quiet, B's first sounds at in_quiet - span.
+    out_quiet = np.array([_quiet_run(a, e, forward=False) for e in ends])
+    in_quiet = np.array([_quiet_run(b, s, forward=True) for s in starts])
+    gap = np.maximum(0.0, out_quiet[:, None] + in_quiet[None, :] - span)
+    flow = np.clip(1.0 - (gap - GAP_OK_SECONDS) / GAP_DEAD_SECONDS, 0.0, 1.0)
+    if a.melody is None or b.melody is None:
+        flow = np.full_like(flow, NEUTRAL)
+
     st_out = np.array([_structure_out(a, e) for e in ends])
     st_in = np.array([_structure_in(b, s) for s in starts])
     structure = (st_out[:, None] + st_in[None, :]) / 2
 
-    quality = (WEIGHTS["handoff"] * handoff + WEIGHTS["energy"] * energy
-               + WEIGHTS["structure"] * structure)
-    return _Seam(quality, handoff, energy, out_level, out_first, out_last, out_full,
-                 in_level, in_full, span)
+    # Quiet melody over a quiet blend is dead air, not a clean handoff.
+    quality = (WEIGHTS["handoff"] * handoff * groove + WEIGHTS["groove"] * groove
+               + WEIGHTS["flow"] * flow + WEIGHTS["payoff"] * payoff[None, :]
+               + WEIGHTS["energy"] * energy + WEIGHTS["structure"] * structure)
+
+    is_drop = np.zeros_like(quality, dtype=bool)
+    drop_cols = [(j, drop_at[round(float(s), 3)][1]) for j, s in enumerate(b.grid)
+                 if round(float(s), 3) in drop_at]
+    if drop_cols:
+        leaving = _nan_to(np.clip(e_out / FULL_ENERGY, 0.0, 1.0), NEUTRAL)
+        for j, strength in drop_cols:
+            q = DROP_BASE + DROP_STRENGTH_WEIGHT * strength + 0.1 * leaving + 0.1 * st_out
+            is_drop[:, j] = q > quality[:, j]
+            quality[:, j] = np.maximum(quality[:, j], q)
+    return _Seam(quality, handoff, groove, energy, in_payoff, gap, in_quiet, out_level, out_first, out_last,
+                 out_full, in_level, in_full, span, is_drop, drop_at)
 
 
 def _window_melody(c: _Cues, start: float, end: float) -> list[float]:
@@ -350,7 +495,9 @@ def _unary(c: _Cues, i: int, n: int, min_len: float, target: Optional[float],
             valid &= s == 0
         if i == n - 1:
             valid &= e == dur
-        score = -FULL_TRIM_COST_PER_SECOND * (s + (dur - e))
+        content = c.content(g)
+        trimmed = content[:, None] + (content[-1] - content[None, :])
+        score = -FULL_TRIM_COST_PER_SECOND * trimmed
     else:
         floor = max(min_len, min(SET_MIN_WINDOW_SECONDS, dur))
         valid = length >= floor
@@ -439,6 +586,10 @@ def _start_text(c: _Cues, s: float, seam: Optional[_Seam], j: int) -> str:
     full = seam.in_full[j]
     if not math.isnan(full):
         text += f", where {_melody_phrase(float(seam.in_level[j]))}"
+        arrives = float(seam.in_quiet[j]) - seam.span
+        if seam.in_level[j] < QUIET_MELODY and -seam.span / 2 < arrives <= GAP_OK_SECONDS:
+            text += (", then its melody kicks in right after the blend" if arrives <= 2.0
+                     else f", then its melody comes in {arrives:.0f} s after the blend")
     return text
 
 
@@ -479,7 +630,13 @@ def choose_windows(
     overlaps = [max(0.0, float(o)) for o in overlap_seconds]
     n = len(tracks)
     cues = [_cues(t) for t in tracks]
-    seams = [_score_seam(cues[i], cues[i + 1], overlaps[i]) for i in range(n - 1)]
+    builds = [_build_starts(tracks[i + 1], overlaps[i]) for i in range(n - 1)]
+    for i, starts in enumerate(builds):
+        c = cues[i + 1]
+        extra = [s for s in starts if 0.0 < s < c.duration]
+        if extra:
+            c.grid = np.unique(np.concatenate([c.grid, np.round(extra, 3)]))
+    seams = [_score_seam(cues[i], cues[i + 1], overlaps[i], builds[i]) for i in range(n - 1)]
     mins = _min_lengths(tracks, overlaps)
     bests = [best_section(t) for t in tracks]
 
@@ -509,7 +666,22 @@ def choose_windows(
         head = seams[i - 1] if i > 0 else None
         tail = seams[i] if i < n - 1 else None
         next_name = cues[i + 1].name if i < n - 1 else ""
-        parts = [f"{_start_text(c, s, head, si)}; {_end_text(c, e, tail, ei)}."]
+        drop_in = head is not None and bool(head.is_drop[picks[i - 1][1], si])
+        drop_out = tail is not None and bool(tail.is_drop[ei, picks[i + 1][0]])
+        drop_seconds = None
+        if drop_in:
+            drop_seconds, strength = head.drop_at[round(s, 3)]
+            start = (f"Comes in at {_clock(s)} for a {drop_seconds - s:.0f} s build; its drop at "
+                     f"{_clock(drop_seconds)} (energy jump {strength:.2f}) hits as "
+                     f"{cues[i - 1].name} leaves")
+        else:
+            start = _start_text(c, s, head, si)
+        if drop_out:
+            end = (("plays to its own ending" if e >= c.duration else f"leaves at {_clock(e)}")
+                   + f", filtered and rolled into a beat of silence before {next_name}'s drop")
+        else:
+            end = _end_text(c, e, tail, ei)
+        parts = [f"{start}; {end}."]
         if target_seconds is not None and bests[i] is not None:
             b0, b1 = bests[i]
             if s <= b0 + BOUNDARY_SECONDS and e >= b1 - BOUNDARY_SECONDS:
@@ -530,8 +702,15 @@ def choose_windows(
             elif clash:
                 parts.append(f"Both it and {next_name} carry melody at this cue, so the renderer "
                              f"echoes it out instead of blending.")
+            if tail.gap[ei, ej] > GAP_OK_SECONDS:
+                parts.append(f"About {tail.gap[ei, ej]:.0f} s pass without melody from either song "
+                             f"around the blend into {next_name}.")
+            if tail.groove[ei, ej] < SPARSE_GROOVE:
+                parts.append(f"The blend into {next_name} is on the sparse side; no fuller cue "
+                             f"handed the melody over as cleanly.")
         windows.append(TrackWindow(track_id=c.track.id, start_seconds=round(s, 3),
-                                   end_seconds=round(e, 3), reason=" ".join(parts)))
+                                   end_seconds=round(e, 3), reason=" ".join(parts),
+                                   drop_seconds=drop_seconds))
 
     if target_seconds is not None:
         played = sum(w.end_seconds - w.start_seconds for w in windows) - sum(overlaps)
