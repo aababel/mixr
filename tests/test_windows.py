@@ -573,3 +573,39 @@ def test_extended_set_mode_still_hits_the_target():
     windows, overlaps = plan_windows(tracks, 0.0, 300.0, transition_length="extended")
     assert abs(played(windows, overlaps) - 300.0) <= SET_TOLERANCE * 300.0
     assert all(o <= min(lengths(windows[i:i + 2])) / 2 for i, o in enumerate(overlaps))
+
+
+def test_votes_shorten_and_lengthen_blends_inside_every_setting():
+    # Regression: the votes only reached the pick through LENGTH_WEIGHT's
+    # small length bonus, so in most seams a short or long vote changed
+    # nothing, and inside "longer" / "extended" a short vote never could.
+    ca, cb = _clean_pair()
+    longer = [plan_windows([ca, cb], p, transition_length="longer")[1][0] for p in (-1.0, 0.0)]
+    extended = [plan_windows([ca, cb], p, transition_length="extended")[1][0] for p in (-1.0, 0.0, 1.0)]
+    assert longer[0] < longer[1]
+    assert extended[0] < extended[1] < extended[2]
+
+
+def test_vote_lean_only_changes_blend_length_never_the_cuts(monkeypatch):
+    # The lean picks among one cell's lengths; the cell keeps its unleaned
+    # score, so cut points and drops are exactly what they'd be without it.
+    import backend.logic.windows as windows
+
+    def cuts(a, b, p, setting):
+        ws, _ = plan_windows([a, b], p, transition_length=setting)
+        return [(w.start_seconds, w.end_seconds, w.drop_seconds) for w in ws]
+
+    pairs = [_clean_pair(), _clashing_pair()]
+    for a, b in pairs:
+        for setting in BLEND_SIZES:
+            for p in (-1.0, 0.0, 1.0):
+                leaned = cuts(a, b, p, setting)
+                monkeypatch.setattr(windows, "LENGTH_LEAN", 0.0)
+                assert cuts(a, b, p, setting) == leaned
+                monkeypatch.undo()
+
+
+def test_vote_lean_never_lengthens_a_vocal_clash():
+    xa, xb = _clashing_pair()
+    for setting in BLEND_SIZES:
+        assert plan_windows([xa, xb], 1.0, transition_length=setting)[1][0] <= CLASH_BLEND_SECONDS
