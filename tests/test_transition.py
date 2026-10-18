@@ -74,17 +74,34 @@ def test_preview_context_clamped_at_track_edges():
     assert prev.shape[0] == out.shape[0] + inc.shape[0] - round(ap.actual_overlap_seconds * SR)
 
 
-def test_beat_snap_lands_incoming_beat_on_outgoing_beat(pair):
+def test_same_tempo_matches_every_beat_without_warping(pair):
     out, ob, inc, ib = pair
     _, ap = render_transition(out, inc, SR, ob, ib, req(4.1), "final")
+    # the grid is locked to the clicks themselves, so allow 0.5 ms of onset timing
     landed = ap.outgoing_start_seconds + ib[0]
-    assert min(abs(landed - b) for b in ob) < 1.5 / SR
-    # snapped length stays within one beat (0.5 s at 120 BPM) of the request
-    assert abs(ap.actual_overlap_seconds - 4.1) <= 0.5
+    assert min(abs(landed - b) for b in ob) < 0.0005
+    # same tempo: every later incoming beat lands on an outgoing beat too
+    for b in ib[1:6]:
+        assert min(abs(ap.outgoing_start_seconds + b - x) for x in ob) < 0.0005
+    # whole bars (8 beats = 4 s at 120 BPM) plus pre-roll and tail, under one beat each
+    assert abs(ap.actual_overlap_seconds - 4.0) <= 1.0
+    assert ap.tempo_change is None
+    assert ap.output_duration_seconds == pytest.approx(ap.actual_overlap_seconds)
     assert ap.beat_alignment_adjustments_seconds == pytest.approx(
         ap.actual_overlap_seconds - 4.1, abs=1e-9
     )
     assert ap.overlap_changed_for_safety is False
+    assert any("beats matched over 8 beats" in s for s in ap.safety_adjustments)
+
+
+def test_irregular_beats_fall_back_to_first_beat_snap(pair):
+    out, ob, inc, ib = pair
+    few = ib[:3]  # too few beats to fit a grid
+    _, ap = render_transition(out, inc, SR, ob, few, req(4.1), "final")
+    landed = ap.outgoing_start_seconds + few[0]
+    assert min(abs(landed - b) for b in ob) < 1.5 / SR
+    assert abs(ap.actual_overlap_seconds - 4.1) <= 0.5
+    assert ap.tempo_change is None
 
 
 def test_no_beat_align_keeps_requested(pair):
@@ -134,18 +151,21 @@ def test_beat_snap_never_leaves_safe_range(pair):
 
 @pytest.mark.parametrize("style", ["equal_power", "linear"])
 def test_fade_shapes(style):
+    """Mid-band content (1 kHz) follows the requested fade curve."""
     n = int(10 * SR)
-    out = np.ones((n, 1), dtype=np.float32) * 0.5
-    inc = np.ones((n, 1), dtype=np.float32) * 0.5
+    sine = (0.5 * np.sin(2 * np.pi * 1000 * np.arange(n) / SR)).astype(np.float32)[:, None]
     seam, ap = render_transition(
-        out, inc, SR, [], [], req(2.0, beat_align=False, fade_style=style), "final"
+        sine, sine.copy(), SR, [], [], req(2.0, beat_align=False, fade_style=style), "final"
     )
     assert ap.fade_style == style
-    assert seam[0, 0] == pytest.approx(0.5, abs=1e-3)  # starts as all outgoing
-    assert seam[-1, 0] == pytest.approx(0.5, abs=1e-3)  # ends as all incoming
-    mid = seam[seam.shape[0] // 2, 0]
-    expected = 0.5 * np.sqrt(2) if style == "equal_power" else 0.5
-    assert mid == pytest.approx(expected, abs=1e-3)
+    m = seam.shape[0]
+    rms = lambda x: float(np.sqrt(np.mean(x ** 2)))
+    w = int(0.05 * SR)
+    assert rms(seam[:w]) == pytest.approx(0.5 / np.sqrt(2), rel=0.03)  # all outgoing
+    assert rms(seam[-w:]) == pytest.approx(0.5 / np.sqrt(2), rel=0.03)  # all incoming
+    # identical in-phase inputs: amplitude = fade_out + fade_in at the midpoint
+    gain = np.sqrt(2) if style == "equal_power" else 1.0
+    assert rms(seam[m // 2 - w // 2:m // 2 + w // 2]) == pytest.approx(gain * 0.5 / np.sqrt(2), rel=0.03)
 
 
 def test_limiter_fires_and_is_recorded():
@@ -156,7 +176,7 @@ def test_limiter_fires_and_is_recorded():
     assert np.max(np.abs(seam)) < 1.0
     assert any("soft limiter" in s for s in ap.safety_adjustments)
     assert ap.applied_gain_db == {"outgoing": 0.0, "incoming": 0.0}
-    assert ap.applied_eq is None and ap.tempo_change is None
+    assert ap.applied_eq.startswith("3-band swap") and ap.tempo_change is None
 
 
 def test_quiet_seam_not_limited(pair):
