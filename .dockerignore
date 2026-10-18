@@ -1,0 +1,15 @@
+.git
+.venv
+venv
+.env
+.env.local
+**/__pycache__
+.pytest_cache
+frontend
+docs
+scripts
+tests
+backend/storage/*
+*.mp3
+*.wav
+.DS_Store
