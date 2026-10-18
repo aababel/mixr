@@ -2,9 +2,58 @@
 
 Your playlist. DJ'd by AI. Built at DubHacks 2026 by Shaan, Aarav, and Sahil.
 
-Pipeline: Upload (3–5 MP3/WAV) → Analyze → Score → Order → optional A/B calibration → Mix → Play/Download.
+Pipeline: Upload (2 to 5 MP3/WAV) → Analyze → Score → Order → optional A/B Tune → Mix → Play/Download.
 
-> Status: upload works end to end. Analyze and order return placeholder data; calibration and mix return 501 until the renderer lands.
+## What it does
+
+- **Analyze.** For every song: tempo, a kick-locked beat grid, musical key
+  (left blank when detection isn't confident), loudness over time, melody
+  activity, 8-bar phrase starts, sections (intro, chorus, drop, break, outro)
+  and how long the song fades in and out.
+- **Score and order.** Every pair of songs gets a compatibility score: 40%
+  harmony (Camelot wheel), 35% tempo (half and double time count as a match),
+  15% energy, 10% mood. A missing score (no confident key, no mood) counts as
+  neutral. The Claude mood step is not wired in yet, so every pair gets a
+  neutral mood and today's scores are fully deterministic. The best order is found by checking every ordering. Users can
+  drag songs into their own order instead, and Mixr explains how it scores
+  against its own pick.
+- **Pick the played part of each song.** Full songs mode trims as little as
+  possible. DJ set mode keeps each song's strongest stretch to fit a target
+  length. Songs may be trimmed in either mode; the UI shows exactly which part
+  of each song plays and why.
+- **Render real transitions.** Each seam lines up on the beat and on a phrase,
+  glides the tempo with Rubber Band when the songs differ, swaps the bass
+  between songs, and matches loudness to -14 LUFS. When both songs have a lead
+  melody at the seam, Mixr does a vocal swap or an echo-out instead of stacking
+  two melodies. Blend length is chosen per pair; the transition length setting
+  (Auto, Longer, Extended) leans it shorter or longer.
+- **Tune (optional A/B).** Two previews of the same seam that differ only in
+  requested blend length, played at equal loudness. Each vote moves a
+  preference value by 0.5 within -1 to 1, and that value leans every blend in
+  the final mix. This is a simple deterministic rule, not a trained model, and
+  it only learns blend length. Skipping it gives a normal default mix.
+- **One renderer, honest manifest.** The A/B previews and the final mix use
+  the same `render_transition`. Each transition in the mix manifest records
+  requested and actual blend length, beat adjustment, tempo glide, EQ, gains
+  and any safety change.
+
+## Before/after demo
+
+`scripts/before_after.py` renders the same song pair two ways: a plain
+crossfade like a normal music player, and Mixr's transition. Both use the same
+decoded audio and the same loudness, so the only difference is the transition.
+
+```bash
+python scripts/before_after.py "outgoing.mp3" "incoming.mp3" --before-overlap 6 --out out/before_after/
+```
+
+It writes `before_plain_crossfade.wav`, `after_mixr.wav`,
+`before_then_after.wav` (both back to back) and `applied.json` (what Mixr
+actually did).
+
+Other scripts: `scripts/analyze_files.py` (print analysis for files),
+`scripts/render_pair.py` (render a short and a long blend of one pair),
+`scripts/make_mix.py` (render a full mix from the command line).
 
 ## Setup
 
@@ -53,8 +102,7 @@ rubberband --version             # 3.x or newer
 python -c "from backend.audio.stretch import rubberband_available; print(rubberband_available())"   # True
 ```
 
-Without it, the glide tests in `tests/test_glide.py` are skipped, and two
-tests in `tests/test_mix.py` currently fail because they assume a tempo glide.
+Without it, the tests that need it (mostly `tests/test_glide.py`) are skipped.
 
 ### Backend
 
@@ -96,8 +144,10 @@ Tests: `pytest`
 
 - All audio time values are in seconds.
 - One `render_transition` powers both A/B previews and the final mix.
-- Final mix keeps every track complete; only overlaps at the seams.
+- Songs may be trimmed to make a better transition or fit a set length; the
+  manifest and UI always show which part of each song actually plays.
 - Calibration and Claude are optional; the default mix must always work.
+- Report what the renderer actually did, never only what was requested.
 - Work on branches, merge through PRs.
 
 Planning documents in `docs/` were written before the event.
