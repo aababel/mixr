@@ -284,6 +284,14 @@ the position in the source track.
     its label (one long chorus split by the 16-bar cap)
   `"verse"` and `"build"` are never set: energy alone can't tell a soft
   verse from a break reliably.
+- `analyze_track` stores `metadata["fade_out_seconds"]` and
+  `metadata["fade_in_seconds"]`: the `edges.py` fade lengths at the song's
+  real end and start (0.0 when there is no fade). `choose_windows` reads
+  them, and `render_mix` / `render_preview` pass them to `render_transition`
+  for a side that plays to its real end / from its real start, so both use
+  the identical value. When a window cuts a side (more than 0.05 s from the
+  edge), the renderer measures the cut audio instead, as before. No schema
+  change.
 - Cue analysis adds about 5-10 s per song. If it fails, the track still
   analyzes; the three fields stay empty and a note says why.
 - **Vocal swap** (`bands.py`), in every seam, preview and final, in both

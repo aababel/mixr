@@ -17,6 +17,7 @@ MIN_WINDOW_SECONDS = 4.0
 FADE_IN_BEATS = 1  # a mix that starts mid-song fades in over about a beat
 FADE_OUT_BEATS = 8  # and one that ends mid-song fades out over about 2 bars
 DEFAULT_BEAT_SECONDS = 0.5
+EDGE_TOLERANCE_SECONDS = 0.05
 
 
 @dataclass
@@ -27,6 +28,27 @@ class Played:
     window: TrackWindow  # the window actually used (clamped to the audio)
     trimmed_start: bool
     trimmed_end: bool
+
+
+FADE_OUT_KEY = "fade_out_seconds"  # track.metadata keys written by analysis.py
+FADE_IN_KEY = "fade_in_seconds"
+
+
+def stored_fade(track: Track, key: str) -> float | None:
+    """Fade length analysis stored in track.metadata, None if absent or unusable."""
+    v = track.metadata.get(key)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not np.isfinite(v) or v < 0:
+        return None
+    return float(v)
+
+
+def edge_fades_for_seam(out_p: "Played", out_t: Track, in_p: "Played", in_t: Track):
+    """(outgoing fade-out, incoming fade-in) to hand render_transition: the
+    stored value when that side plays to its real end / from its real start,
+    None (measure from the audio) when a window cut it."""
+    tail = None if out_p.trimmed_end else stored_fade(out_t, FADE_OUT_KEY)
+    head = None if in_p.trimmed_start else stored_fade(in_t, FADE_IN_KEY)
+    return tail, head
 
 
 def beat_seconds(track: Track) -> float:
@@ -74,7 +96,10 @@ def play(audio: np.ndarray, track: Track, window: TrackWindow | None, sr: int) -
     if melody and hop:
         melody = melody[int(start / hop):int(np.ceil(end / hop))] or None
     used = window.model_copy(update={"start_seconds": start, "end_seconds": end})
-    return Played(audio[s:e], beats, melody, used, s > 0, e < n)
+    # a window within EDGE_TOLERANCE_SECONDS of the track's edge plays to that edge
+    # (the track's listed duration and its decoded length can differ by a few ms)
+    tol = int(EDGE_TOLERANCE_SECONDS * sr)
+    return Played(audio[s:e], beats, melody, used, s > tol, e < n - tol)
 
 
 def edge_fades(p: Played, track: Track, sr: int, first: bool, last: bool) -> tuple[np.ndarray, list[str]]:

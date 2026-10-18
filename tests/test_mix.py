@@ -7,6 +7,9 @@ from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.mix import render_mix
 from backend.audio.preview import PREVIEW_CONTEXT_SECONDS, render_preview
 from backend.audio.transition import render_transition
+from backend.audio.stretch import rubberband_available
+
+needs_rb = pytest.mark.skipif(not rubberband_available(), reason="rubberband CLI not installed")
 
 SR = RENDER_SR
 Q = 1.5 / 32768  # 16-bit output quantization tolerance
@@ -29,6 +32,7 @@ def three(tmp_path):
     return [make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 25, 124, 2), make(tmp_path, "c", 18, 128, 3)]
 
 
+@needs_rb
 def test_mix_keeps_every_track_complete(tmp_path, three):
     paths, tracks = [p for p, _ in three], [t for _, t in three]
     out = tmp_path / "mix.wav"
@@ -120,6 +124,7 @@ def test_preview_is_exact_excerpt_of_final_mix(tmp_path, three):
     np.testing.assert_allclose(prev, mix[start:start + len(prev)], atol=Q)
 
 
+@needs_rb
 def test_ab_previews_differ_only_in_overlap(tmp_path, three):
     (pa, ta), (pb, tb), _ = three
     apps = [
