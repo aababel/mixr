@@ -165,3 +165,26 @@ def test_ab_previews_differ_only_in_overlap(tmp_path, three):
         {k: v for k, v in b["applied_gain_db"].items() if k != "preview_output"}
     assert a["tempo_change"] == b["tempo_change"] and a["fade_style"] == b["fade_style"]
     assert b["actual_overlap_seconds"] - a["actual_overlap_seconds"] > 2.0
+
+
+def test_master_in_chunks_matches_one_pass(tmp_path, monkeypatch):
+    import backend.audio.mix as mix_mod
+    from backend.audio.transition import limit_peaks
+
+    rng = np.random.default_rng(5)
+    n = int(31.3 * SR)
+    x = (0.03 * rng.standard_normal((n, 2))).astype(np.float32)
+    x[::SR // 3] = 0.99
+    raw = tmp_path / "raw.wav"
+    sf.write(raw, x, SR, subtype="FLOAT")
+    monkeypatch.setattr(mix_mod, "_CHUNK", SR * 4)
+    stats = {"clipped": 0}
+    notes = mix_mod._master(raw, tmp_path / "out.wav", stats)
+    out, _ = sf.read(tmp_path / "out.wav", dtype="float32")
+    from backend.audio.loudness import integrated_loudness
+    from backend.audio.transition import gain_factor
+    gain_db = float(np.clip(-14.0 - integrated_loudness(x, SR), -mix_mod.MASTER_MAX_GAIN_DB,
+                            mix_mod.MASTER_MAX_GAIN_DB))
+    want = limit_peaks(x * gain_factor(gain_db), mix_mod.MASTER_CEILING, SR, edge_seconds=0.0)
+    np.testing.assert_allclose(out, want, atol=2 * Q)
+    assert "peaks limited" in notes[0]

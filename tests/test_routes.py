@@ -328,3 +328,23 @@ def test_transition_length_rejects_unknown_values(client):
 def test_unknown_mix_404(client):
     assert client.get("/api/mixes/nope").status_code == 404
     assert client.get("/api/mixes/nope/audio").status_code == 404
+
+
+def test_analysis_runs_one_song_at_a_time_on_small_containers(tmp_path, monkeypatch):
+    from backend.api import routes
+
+    monkeypatch.delenv("MIXR_ANALYZE_WORKERS", raising=False)
+    monkeypatch.delenv("RAILWAY_PROJECT_ID", raising=False)
+    limit = tmp_path / "memory.max"
+    monkeypatch.setattr(routes, "CGROUP_MEMORY_LIMITS", (limit,))
+    assert routes._analyze_workers() == routes.MAX_TRACKS  # no limit file: a laptop
+    monkeypatch.setenv("RAILWAY_PROJECT_ID", "x")
+    assert routes._analyze_workers() == 1
+    limit.write_text("1073741824\n")  # 1 GB
+    assert routes._analyze_workers() == 1
+    limit.write_text("4294967296\n")  # 4 GB
+    assert routes._analyze_workers() == 2
+    limit.write_text("max\n")
+    assert routes._analyze_workers() == 1  # unreadable limit on Railway
+    monkeypatch.setenv("MIXR_ANALYZE_WORKERS", "3")
+    assert routes._analyze_workers() == 3

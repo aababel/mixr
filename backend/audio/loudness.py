@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import soundfile as sf
 from scipy.signal import sosfilt
 
 from backend.audio.loading import RENDER_SR, load_render_audio
@@ -90,8 +91,12 @@ def integrated_loudness(audio: np.ndarray, sr: int) -> Optional[float]:
     power = np.einsum("ij,ij->i", x, x)
     csum = np.concatenate([[0.0], np.cumsum(power)])
     starts = np.arange(0, x.shape[0] - block + 1, hop)
-    z = (csum[starts + block] - csum[starts]) / block
+    return _gated(csum[starts + block] - csum[starts], block)
 
+
+def _gated(energy: np.ndarray, block: int) -> Optional[float]:
+    """Gated loudness from each 400 ms block's summed energy."""
+    z = energy / block
     with np.errstate(divide="ignore"):
         lk = -0.691 + 10.0 * np.log10(z)
     z = z[lk > -70.0]  # absolute gate
@@ -101,6 +106,32 @@ def integrated_loudness(audio: np.ndarray, sr: int) -> Optional[float]:
     with np.errstate(divide="ignore"):
         z = z[-0.691 + 10.0 * np.log10(z) > rel_gate]  # relative gate
     return float(-0.691 + 10.0 * np.log10(z.mean()))
+
+
+def file_loudness(path: Path, chunk_seconds: float = 10.0) -> tuple[Optional[float], float]:
+    """(integrated LUFS, sample peak) of an audio file, read chunk by chunk so
+    a whole mix never sits in memory. Same result as integrated_loudness."""
+    with sf.SoundFile(str(path)) as f:
+        sr = f.samplerate
+        hop = int(round(0.1 * sr))
+        if int(round(0.4 * sr)) != 4 * hop:
+            audio = f.read(dtype="float32", always_2d=True)
+            peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+            return integrated_loudness(audio, sr), peak
+        sos = np.vstack([np.concatenate([b, a]) for b, a in _k_weighting(sr)])
+        zi = np.zeros((sos.shape[0], 2, f.channels))
+        hops, carry, peak = [], np.zeros(0), 0.0
+        for chunk in f.blocks(blocksize=hop * int(chunk_seconds * 10), dtype="float64", always_2d=True):
+            peak = max(peak, float(np.max(np.abs(chunk))))
+            y, zi = sosfilt(sos, chunk, axis=0, zi=zi)
+            e = np.concatenate([carry, np.einsum("ij,ij->i", y, y)])
+            whole = e.shape[0] // hop * hop
+            hops.append(e[:whole].reshape(-1, hop).sum(axis=1))
+            carry = e[whole:]
+    h = np.concatenate(hops) if hops else np.zeros(0)
+    if h.shape[0] < 4:
+        return None, peak
+    return _gated(h[:-3] + h[1:-2] + h[2:-1] + h[3:], 4 * hop), peak
 
 
 # ---------------------------------------------------------------- gain

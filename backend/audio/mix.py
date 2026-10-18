@@ -45,11 +45,12 @@ from backend.api.schemas import (
 )
 from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.loudness import (
-    DEFAULT_LOUDNESS, TrackGain, gain_notes, integrated_loudness, track_gain_for_path,
+    DEFAULT_LOUDNESS, TrackGain, file_loudness, gain_notes, track_gain_for_path,
 )
 from backend.audio.stretch import rubberband_available
 from backend.audio.transition import (
     DEFAULT_SAFETY,
+    LIMIT_HOLD_SECONDS,
     SafetyLimits,
     gain_factor,
     limit_peaks,
@@ -81,27 +82,40 @@ def _write(f: sf.SoundFile, block: np.ndarray, stats: dict, gain_db: float = 0.0
 def _master(raw: Path, out_path: Path, stats: dict) -> list[str]:
     """Finish the float mix in `raw` into a 16-bit WAV at out_path: one gain
     toward the loudness target (at most MASTER_MAX_GAIN_DB either way), then
-    the look-ahead limiter on the whole mix so no peak passes MASTER_CEILING."""
-    audio, sr = sf.read(str(raw), dtype="float32", always_2d=True)
-    lufs = integrated_loudness(audio, sr)
+    the look-ahead limiter on the whole mix so no peak passes MASTER_CEILING.
+    Works _CHUNK by _CHUNK, so the whole mix is never in memory."""
+    lufs, peak = file_loudness(raw)
     gain_db = 0.0
     if lufs is not None:
         gain_db = float(np.clip(DEFAULT_LOUDNESS.target_lufs - lufs, -MASTER_MAX_GAIN_DB, MASTER_MAX_GAIN_DB))
-        if abs(gain_db) >= 0.1:
-            audio *= gain_factor(gain_db)
-        else:
+        if abs(gain_db) < 0.1:
             gain_db = 0.0
-    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    g = gain_factor(gain_db)
+    peak *= float(g)
+    limit = peak > MASTER_CEILING
     note = (f"mastered: whole mix {gain_db:+.1f} dB toward {DEFAULT_LOUDNESS.target_lufs:.1f} LUFS"
             + (f" (measured {lufs:.1f})" if lufs is not None else ""))
-    if peak > MASTER_CEILING:
-        audio = limit_peaks(audio, MASTER_CEILING, sr, edge_seconds=0.0)
+    if limit:
         note += f"; peaks limited from {20 * np.log10(peak):+.1f} to -1.0 dBFS"
-    clipped = int(np.count_nonzero(np.abs(audio) > 1.0))
-    if clipped:
-        stats["clipped"] += clipped
-        audio = np.clip(audio, -1.0, 1.0)
-    sf.write(str(out_path), audio, sr, subtype="PCM_16")
+    # the limiter's gain at a sample depends on audio up to 2 * hold away
+    ctx = 2 * int(round(LIMIT_HOLD_SECONDS * RENDER_SR)) + 4
+    with sf.SoundFile(str(raw)) as src, \
+            sf.SoundFile(str(out_path), "w", src.samplerate, src.channels, subtype="PCM_16") as dst:
+        n = src.frames
+        for start in range(0, n, _CHUNK):
+            lo, hi = max(0, start - ctx), min(n, start + _CHUNK + ctx)
+            src.seek(lo)
+            block = src.read(hi - lo, dtype="float32", always_2d=True)
+            if gain_db:
+                block = block * g
+            if limit:
+                block = limit_peaks(block, MASTER_CEILING, src.samplerate, edge_seconds=0.0)
+            part = block[start - lo:start - lo + min(_CHUNK, n - start)]
+            clipped = int(np.count_nonzero(np.abs(part) > 1.0))
+            if clipped:
+                stats["clipped"] += clipped
+                part = np.clip(part, -1.0, 1.0)
+            dst.write(part)
     return [note]
 
 
