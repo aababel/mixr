@@ -194,6 +194,13 @@ LENGTH_WEIGHT = 0.1
 LENGTH_BASE = 0.5
 PREFERENCE_LEAN = 1.0
 CLASH_STACK = 0.5
+# On top of that, the A/B votes pick among the blend lengths a seam allows:
+# each blend scores LENGTH_LEAN x vote x (its reach - the shortest allowed
+# blend's reach there). Inside LENGTH_WEIGHT alone a vote was too small to
+# change the pick in most seams. Relative to the shortest blend so it never
+# tips a seam between a blend and a drop, and votes only (not the setting's
+# lean) so a short vote still shortens "longer" and "extended" blends.
+LENGTH_LEAN = 0.3
 
 TransitionLength = Literal["auto", "longer", "extended"]
 
@@ -322,8 +329,7 @@ def _fixed(seam: _Seam) -> _SeamChoice:
 def _length_bonus(seam: _Seam, preference: float, stack_weight: float = 1.0) -> np.ndarray:
     """preference: overlap_preference plus the setting's lean. Reach keeps
     growing past MAX_BLEND_SECONDS for extended blends."""
-    reach = (math.log2(max(seam.overlap, MIN_BLEND_SECONDS) / MIN_BLEND_SECONDS)
-             / math.log2(MAX_BLEND_SECONDS / MIN_BLEND_SECONDS))
+    reach = _reach(seam.overlap)
     harmony = seam.harmony if seam.harmony is not None else NEUTRAL
     stack = seam.stack if seam.stack is not None else 0.0
     bonus = LENGTH_WEIGHT * reach * (LENGTH_BASE + 2.0 * (harmony - 0.5) - stack_weight * stack
@@ -338,15 +344,35 @@ def _option_score(o: _Seam, preference: float, stack_weight: float) -> np.ndarra
     return score
 
 
+def _reach(seconds: float) -> float:
+    return (math.log2(max(seconds, MIN_BLEND_SECONDS) / MIN_BLEND_SECONDS)
+            / math.log2(MAX_BLEND_SECONDS / MIN_BLEND_SECONDS))
+
+
+def _lean(options: list[_Seam], valid: list[np.ndarray], preference: float) -> list[np.ndarray]:
+    """LENGTH_LEAN x preference x (reach - shortest allowed blend's reach),
+    per option and cell; 0 for drops and cells with no allowed blend."""
+    reach = [_reach(o.overlap) for o in options]
+    blends = [ok & ~o.is_drop for o, ok in zip(options, valid)]
+    floor = np.full(options[0].quality.shape, np.inf)
+    for r, ok in zip(reach, blends):
+        floor = np.where(ok, np.minimum(floor, r), floor)
+    floor = np.where(np.isfinite(floor), floor, 0.0)
+    return [np.where(ok, LENGTH_LEAN * preference * (r - floor), 0.0) for r, ok in zip(reach, blends)]
+
+
 def _choose(options: list[_Seam], valid: list[np.ndarray], preference: float, stack_weight: float,
-            sustain: Optional[list] = None) -> _SeamChoice:
+            sustain: Optional[list] = None, vote: float = 0.0) -> _SeamChoice:
     """Every cell takes its best valid option (a drop is valid everywhere:
-    its length is its build)."""
+    its length is its build). vote (the A/B overlap_preference alone, without
+    the setting's lean) leans the pick among a cell's options; the cell keeps
+    its best unleaned score, so the vote never moves which (A end, B start)
+    wins, only how long that seam blends."""
     scores = np.stack([np.where(ok | o.is_drop, _option_score(o, preference, stack_weight), -np.inf)
                        for o, ok in zip(options, valid)])
-    pick = np.argmax(scores, axis=0)
-    return _SeamChoice(options, np.take_along_axis(scores, pick[None], 0)[0], pick, valid, sustain,
-                       preference, stack_weight)
+    leaned = scores + np.stack(_lean(options, valid, vote))
+    pick = np.argmax(leaned, axis=0)
+    return _SeamChoice(options, scores.max(axis=0), pick, valid, sustain, preference, stack_weight)
 
 
 def tempos_blend(a: Track, b: Track) -> bool:
@@ -534,7 +560,7 @@ def _landing_choice(a: _Cues, b: _Cues, size: BlendSize, preference: float, drop
         rooms.append(room)
         valid.append((land[None, :] > 0) & (req[None, :] <= room + unit / BEATS_PER_BAR))
     _fill_fallback(options, valid, rooms, unit / BEATS_PER_BAR)
-    choice = _choose(options, valid, preference, size.stack_weight, sustain)
+    choice = _choose(options, valid, preference, size.stack_weight, sustain, vote=preference - size.lean)
     choice.clash = clash
     return choice
 
@@ -565,7 +591,7 @@ def _unmatched_choice(a: _Cues, b: _Cues, size: BlendSize, preference: float, dr
         seam.kind, seam.bars, seam.requests = "echo", bars, np.full(len(starts), length)
         options.append(seam)
         valid.append(~beatless & ((length <= limit[:, None] + beat) | (bars == 1)))
-    return _choose(options, valid, preference, size.stack_weight)
+    return _choose(options, valid, preference, size.stack_weight, vote=preference - size.lean)
 
 
 def _seam_choice(a: _Cues, b: _Cues, size: BlendSize, preference: float, drop_at: dict) -> _SeamChoice:
