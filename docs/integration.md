@@ -87,11 +87,18 @@ Routes need no change. Every seam (A/B previews and the final mix) now:
   1x, 2x or 0.5x is closest (100 and 200 BPM are 0% apart and match on every
   other beat), so the 90-180 BPM fold in analysis only changes the number
   shown, never which seams match.
-- **Falls back to a short ~2-beat blend** ending on an incoming beat when the
-  tempos differ by more than 22% after half/double folding (e.g. 90 BPM rap
-  into 128 BPM house), or when Rubber Band is not installed. The requested
-  overlap is not used there, so both A/B previews of such a seam are the same
-  length.
+- **Tempos too far apart to match** (more than 22% after half/double
+  folding, e.g. 90 BPM rap into 128 BPM house): if A's ending or B's opening
+  has no steady kick for at least 4 s (`seam_plan.pulse_curve`: how sharply
+  the onset flux folds onto the beat period over 12 s windows, per second;
+  below 1.8 is beatless), it is a **beatless blend** of the requested length,
+  up to that beatless stretch, with no warp and the same band swaps
+  (`plan_beatless`, note `"beatless blend of ..."`). Otherwise both sides
+  have a beat and the seam is an **echo-out** (below). `analyze_track`
+  stores the curve as `metadata["pulse"]` / `metadata["pulse_hop_seconds"]`
+  so the planner and the renderer judge the same thing; without it the
+  renderer measures the audio near the seam. The ~2-beat short blend is now
+  only the fallback when Rubber Band is not installed.
 - **Swaps frequency bands, landing on the phrase**: the blend resolves on its
   last matched beat, the phrase boundary in both songs. Lows (<200 Hz) swap
   on that beat, highs (>5 kHz) halfway, and mids cross over in the second
@@ -113,11 +120,12 @@ Routes need no change. Every seam (A/B previews and the final mix) now:
   seam"). Fades under 1 s are ignored, fades over 12 s are capped. The 32 s
   overlap limit applies to the blend; the whole seam may be up to 32 s plus
   the fades, and never more than half of either track.
-- **Blends whole phrases**: Tune compares 8 s and 24 s blends (16 s when
-  skipped). A matched blend is 32 beats (an 8-bar phrase) when that is
-  within 0.8-1.3x the requested length, else 16 beats (0.7-1.35x), else the
-  nearest whole bar count. Window edges sit on phrase starts, so whole-phrase
-  blends keep both songs' phrases changing together.
+- **Lands where it was aimed**: a requested length within half a beat of
+  a whole number of bars (`plan_windows` aims every blend at an event in B,
+  counted in bars) renders exactly that many bars, past any fade the seam
+  is lengthened for, so the bass swap hits the event. Other requests (the
+  Tune trials, 8 s and 24 s) round as before: 32 beats when within
+  0.8-1.3x, else 16 beats (0.7-1.35x), else the nearest whole bar count.
 
 Field meanings with a glide (no schema change):
 
@@ -317,18 +325,21 @@ the position in the source track.
   B's mids at -14 dB before it, so two vocals are never loud together.
   Recorded as `applied_eq` containing `"mids (vocals) swapped"` and a note
   `"both sides have lead melody at the seam: ..."`.
-- **Echo-out** (`echo.py`): the same clash when both songs have beats that
-  can't be matched (tempos over 22% apart). A plays its last bar with
-  its lows ramped out, its last beat echoes 4 times on a 1-beat delay
-  (high-passed at 300 Hz, -6 dB per repeat), and B starts so its first beat
-  lands on A's last bar line (or right at the bar line if B has more than a
-  beat of lead-in). Every sample of both songs still plays. The decision
-  uses fixed 8 s stretches, not the requested overlap, so A/B previews of
-  such a seam are identical and the Tune step skips them (audible gap 0).
-  Recorded as: `applied_eq` starting with `"echo-out"`,
-  `overlap_changed_for_safety = true`, notes `"melody at the seam: outgoing
-  x, incoming y"` and `"requested overlap not used: ..."`, and a manifest
-  limitation. The echo tail rings under B, so `output_duration_seconds -
+- **Echo-out** (`echo.py`): every seam between tempos over 22% apart where
+  both sides have a beat, and the same vocal clash when the beats can't be
+  matched (even with a beatless side). A's fade-out is cut, A plays its
+  last 1, 2 or 4 bars (the closest to the requested overlap, at most half
+  of A) with its lows ramped out, its last beat echoes 4, 6 or 8 times on a
+  1-beat delay (high-passed at 300 Hz, fading to the same level), and B
+  starts so its first beat lands on A's last bar line (with more than a
+  beat of lead-in, its sound starts on the bar line, any quiet start under
+  A), so there is never a silent beat. Every sample of both songs still
+  plays. Tune trials of 8 and 24 s get echo-outs within a second or so of
+  each other, so the Tune step skips these seams (audible gap under 2 s). Recorded as: `applied_eq` starting with `"echo-out"`, notes
+  `"melody at the seam: outgoing x, incoming y"` and `"requested overlap
+  sets the echo-out's length instead of a blend: ..."`,
+  `overlap_changed_for_safety = true` only for a vocal clash, and a
+  manifest limitation. The echo tail rings under B, so `output_duration_seconds -
   actual_overlap_seconds` is where B's sample 0 plays inside the seam; the
   timeline formula above already handles that, same as a glide.
   So once `choose_windows` hands off melodies cleanly, echo-out only kicks
@@ -369,28 +380,53 @@ def plan_windows(
     """Windows plus a blend length per seam, chosen for each pair of songs."""
 ```
 
-**Blend length per pair** (`plan_windows`, what the routes use): each seam
-is scored at whole phrases of 16, 32 and 64 beats of the outgoing song's
-tempo (`blend_lengths`, kept within 4-32 s; 4/8/16/24 s without a tempo; one
-4 s blend when the tempos are too far apart to beat-match). Melody handoff,
-groove, payoff and harmony are measured over each length, and a longer blend
-earns `0.1 x reach x (0.5 + 2 x (harmony - 0.5) - stack + p)`, where reach
-runs 0 at 4 s to 1 at 32 s and stack is how much melody both songs carry over
-the blend (plus 0.5 where the vocals would have to swap). So songs in key
-with a clean handoff ride together for 32-64 beats, songs whose melodies
-collide hand over in 16, and the votes lean every seam without overriding
-the songs. A chosen length that won't fit in half of either window drops to
-the longest one that does. Each reason ends with the length and why
-("Long blend into X (64 beats, 29 s): their notes line up.").
+**Blend length per pair** (`plan_windows`, what the routes use): nothing
+is a fixed ladder; every seam's length comes from the two songs.
+
+- *Where it can land*: for each entry point in B, the events after it:
+  vocal entries (melody coming in after 4 s without one), `chorus`/`drop`/
+  `break`/`outro` section starts, energy lifts (+0.15 at a bar line), drops,
+  phrase starts and half phrases, scored chorus/drop 1.0, vocal 0.9, lift
+  and section 0.7, phrase and break 0.5, half phrase 0.25 (events within
+  ~a beat merge, stacking +0.15). Each is counted in whole bars of matched
+  beats from B's first beat, at least 8 beats, up to the setting's cap.
+- *What A can carry*: the blend may not start before A's last vocal line
+  starts, nor before a chorus, drop or energy lift in A's last stretch, and
+  never runs past A's fade (it ends where the fade starts). Where both
+  songs carry melody at the seam (echo.py's 8 s test), or the two melodies
+  would sing over each other across the blend (stack >= 0.55), it stays at
+  most 8 s whatever the setting or votes.
+- *Choosing*: every allowed landing is scored with the seam terms below
+  over its own length, plus 0.1 x the landing's strength, plus
+  `0.1 x reach x (0.5 + 2 x (harmony - 0.5) - stack + p)`, where reach runs
+  0 at 4 s to 1 at 32 s (and on past it for extended blends), stack is how
+  much melody both songs carry over the blend (plus 0.5 where the vocals
+  would have to swap) and p is the votes' preference plus the setting's
+  lean. With no event in reach, any whole-bar length A can carry competes
+  the same way. A length that won't fit in half of either window drops to the best
+  one that does.
+- *Tempos too far apart*: a beatless blend as long as the beatless stretch
+  (A's ending or B's opening, from the stored pulse curve; not where both
+  carry melody), else an echo-out of up to 2 bars (4 with Longer/Extended)
+  that A can carry, scored 0.95x / 0.8x of a blend.
+- Each reason says how long, where it lands and what stopped a later
+  landing: "Blends into X over 24 s (48 beats) and lands as its vocals
+  come in at 1:12.", "...lands on its chorus at 2:03; a later landing
+  would start the blend before its last vocal line at 3:41.", "Their tempos
+  (128 and 91 BPM) are too far apart to beat-match and both have a beat, so
+  it echoes out over its last 2 bars ...".
 
 **Transition length setting** (`transition_length`, `windows.BLEND_SIZES`):
-`"auto"` (default) is exactly the above. `"longer"` adds 1.0 to p and raises
-the cap to 40 s, so 64-beat blends fit at 96+ BPM. `"extended"` adds 1.5 to
-p, tries 16/32/64/128 beats up to 60 s, halves the stack penalty (vocal
-clashes still shorten a blend, just less) and budgets set-mode windows for
-the longest length. Tempos that can't be beat-matched still get the 4 s
-blend, and the fit-in-half-a-window rule still applies; in set mode the
-target length wins, so a short set caps its blends to fit. Render with
+`"auto"` (default) caps landings at 32 s with no lean. `"longer"` adds 1.0
+to p and lets a blend land up to 40 s in; `"extended"` adds 1.5 and up to
+60 s, halving the stack penalty in the length bonus. Both allow 4-bar
+echo-outs, and set mode budgets 16, 24 or 40 s per seam before the real
+lengths are known (a last pass mixes window lengths when every window
+moving a whole phrase at once would step over the target). On the One More
+Time pair, Auto lands on its chorus 31 s in and Extended on the same chorus
+47 s in. The 8 s cap for two melodies and the fit-in-half-a-window rule
+still apply; in set mode the target length wins, so a short set caps its
+blends to fit. Render with
 `overlap_limits(transition_length)`, which raises only
 `SafetyLimits.max_overlap_seconds`; the default stays 32 s. The A/B trial
 compares 8/24 s (auto), 12/36 s (longer) or 24/56 s (extended).
@@ -451,8 +487,9 @@ How the implementation decides (constants at the top of the module):
   scores 0.2 + 0.25 x strength + 0.1 x A's energy as it leaves + 0.1 x
   structure (at most ~0.65), and replaces the blend where it scores higher,
   so it only takes over from weak blends: clean blends score 0.75-0.9.
-  Blends between tempos over 22% apart (which render as ~2-beat blends)
-  are scaled by 0.6. The incoming window then sets
+  Drops between tempos over 22% apart (a cut with a beat of silence) are
+  scaled by 0.8, so they only win over an echo-out or a beatless blend
+  where B has a strong drop. The incoming window then sets
   `drop_seconds`; mix.py and preview.py turn that into
   `TransitionRequest(style="drop", requested_overlap_seconds=build)`.
   backend/audio/drop.py renders it: the outgoing song gets a resonant
@@ -462,7 +499,7 @@ How the implementation decides (constants at the top of the module):
   (layered, the beat never stops); otherwise the outgoing's last bar rolls
   (1, 1/2, 1/4, 1/8 beat), the beat before the drop is silent, and the
   incoming song starts cold on its drop (cut). Both A/B previews of a drop
-  seam sound the same, like echo-out.
+  seam sound the same.
 - Full mode: the first song starts at 0 and the last plays to its end; each
   trimmed second costs 0.003 (a sparse second, below 0.7 of the song's
   normal loudness, proportionally less) and no edge loses more than 30% of
@@ -492,7 +529,8 @@ How the implementation decides (constants at the top of the module):
 - UI: a "Full songs / DJ set" toggle with a set-length picker and an
   "Auto / Longer / Extended" transition-length picker on the running-order
   screen; the setting flows into both the A/B previews and the final mix,
-  and a blend over 32 s reads "extended blend" on its card. The timeline shows only the played part of each song,
+  and a blend over 32 s reads "extended blend" on its card (an echo-out
+  reads "Echo → downbeat", a beatless blend "No beat to clash"). The timeline shows only the played part of each song,
   and the tracklist shows which part was used (e.g. "1:12-2:45").
 - Preview cue points use the neutral preference (`plan_windows(p=0)`),
   since the votes aren't in yet; the A/B trial itself still compares the

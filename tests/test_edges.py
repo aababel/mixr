@@ -75,7 +75,7 @@ def test_crossfade_finishes_before_the_outgoing_fade():
     body = _rms_db(inc[20 * SR:30 * SR])
     h = SR // 2
     levels = [_rms_db(seam[i:i + h]) - body for i in range(0, seam.shape[0] - h, h)]
-    assert min(levels) > -4.0, levels
+    assert min(levels) > -6.0, levels  # the echo filters A's bass out: a dip, never a hole
     # beat alignment adjustments exclude the deliberate fade extension; what's
     # left is rounding to a whole phrase (seam_plan.PHRASE_FITS: up to +30%)
     assert abs(ap.beat_alignment_adjustments_seconds) < 0.35 * 8.0
@@ -94,16 +94,18 @@ def test_fade_aware_seam_still_keeps_every_sample():
     assert out.shape[0] - o_start <= out.shape[0] // 2 and consumed <= inc.shape[0] // 2
 
 
-def test_short_blend_happens_before_the_outgoing_fade():
+def test_echo_out_happens_before_the_outgoing_fade():
     out, ob = beat_track(40, 100, seed=5, fade_out=4.0)
-    inc, ib = beat_track(40, 140, seed=6)  # 40% apart: short blend
+    inc, ib = beat_track(40, 140, seed=6)  # 40% apart, both with a beat: echo-out
     seam, ap = render_transition(out, inc, SR, ob, ib, req(8.0), "final")
-    assert any(s.startswith("short blend") for s in ap.safety_adjustments)
-    assert ap.actual_overlap_seconds == pytest.approx(4.0 + 2 * 60 / 140, abs=0.5)
+    assert ap.applied_eq.startswith("echo-out")
+    assert any("4.00s fade-out cut" in s or "fade-out cut" in s for s in ap.safety_adjustments)
+    offset = ap.output_duration_seconds - ap.actual_overlap_seconds
+    assert ap.outgoing_start_seconds + offset <= 40 - 4.0 + 0.1  # B is in before A starts to fade
     body = _rms_db(inc[20 * SR:30 * SR])
     h = int(1.2 * SR)  # two beats of either track, so kicks don't make the level jump
     levels = [_rms_db(seam[i:i + h]) - body for i in range(0, seam.shape[0] - h, SR // 4)]
-    assert min(levels) > -4.0, levels
+    assert min(levels) > -6.0, levels  # the echo filters A's bass out: a dip, never a hole
 
 
 def test_preview_and_final_agree_with_edges():

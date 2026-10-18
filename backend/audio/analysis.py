@@ -19,6 +19,8 @@ Fields filled:
   metadata                key_name, key_confidence, intro/outro mean energy,
                           fade_out_seconds / fade_in_seconds (edges.py, the same
                           measurement the renderer uses at a song's real end/start),
+                          pulse / pulse_hop_seconds (seam_plan.pulse_curve: how
+                          steady the kick is, per second; low = no beat there),
                           analysis_sample_rate, notes
 """
 from pathlib import Path
@@ -29,6 +31,7 @@ import numpy as np
 from backend.api.schemas import Track
 from backend.audio.cues import analyze_cues
 from backend.audio.edges import fade_in_seconds, fade_out_seconds
+from backend.audio.seam_plan import PULSE_HOP_SECONDS, pulse_curve
 
 ANALYSIS_SR = 22050
 ENERGY_HOP_SECONDS = 0.5
@@ -150,6 +153,11 @@ def analyze_track(path: Path, track: Track) -> Track:
         except Exception as exc:  # cue points are optional: never fail the whole analysis
             cues = {"melody_activity": [], "phrase_starts_seconds": [], "sections": []}
             notes.append(f"cue analysis failed ({exc}); no melody, phrases or sections")
+        try:
+            pulse = pulse_curve(y, sr, 60.0 / bpm, PULSE_HOP_SECONDS) if bpm else []
+        except Exception as exc:
+            pulse = []
+            notes.append(f"kick pulse analysis failed ({exc}); beatless stretches not detected")
 
         metadata = dict(track.metadata)
         metadata.update(
@@ -163,6 +171,8 @@ def analyze_track(path: Path, track: Track) -> Track:
                 "decoded_duration_seconds": round(decoded_seconds, 3),
                 "fade_out_seconds": round(fade_out_seconds(y, sr), 3),
                 "fade_in_seconds": round(fade_in_seconds(y, sr), 3),
+                "pulse": pulse,
+                "pulse_hop_seconds": PULSE_HOP_SECONDS,
                 "analysis_notes": notes,
             }
         )

@@ -21,11 +21,14 @@ Processing actually performed (and recorded in AppliedTransition):
      still play inside the seam, under the other track.
      Plan the seam from both beat lists (seam_plan.py):
        - tempos within 22% (after half/double folding): match beats
-         beat-for-beat over a whole phrase (32 or 16 beats) near the
-         requested length, else a whole number of bars; if the grids would
-         drift, glide the tempo (step 3)
-       - tempos further apart: short ~2-beat blend ending on an incoming
-         beat, no warp
+         beat-for-beat. A request that lands on a whole bar (choose_windows
+         aims it at the incoming song's next event) plays exactly that many
+         bars; any other is rounded to a whole phrase (32 or 16 beats), else
+         bars. If the grids would drift, glide the tempo (step 3)
+       - tempos further apart, one side with no steady kick at the seam
+         (pulse_curve): beatless blend of the requested length (up to that
+         beatless stretch), no warp, nothing to clash
+       - tempos further apart with a beat on both sides: echo-out (echo.py)
        - no steady beat grid: snap the first incoming beat onto an
          outgoing beat (no warp)
   3. Tempo glide: Rubber Band time map warps the outgoing side from its
@@ -43,9 +46,10 @@ Processing actually performed (and recorded in AppliedTransition):
 Vocal clash: when melody data is passed and BOTH sides carry lead melody at
 the seam (outgoing's last 8 s, incoming's first 8 s), the blend's mids swap
 on a beat at the bass swap instead of crossfading (bands.py, mid_swap). If
-the beats can't be matched, steps 2-5 are replaced by an echo-out
-(echo.py): A plays its last bar with the bass filtered out, its last beat
-echoes, and B drops on a downbeat at A's bar line.
+the beats can't be matched (even with a beatless side: two melodies don't
+blend without a beat to swap on), steps 2-5 are replaced by an echo-out (echo.py): A plays its last bars with the bass
+filtered out, its last beat echoes, and B drops on a downbeat at A's bar
+line, under the echo tail.
 
 Drop (drop.py): request.style == "drop" (choose_windows found a drop in the
 incoming song; requested_overlap_seconds is its build). The outgoing song is
@@ -65,14 +69,22 @@ from backend.audio.echo import (
 )
 from backend.audio.edges import MAX_EDGE_SECONDS, fade_in_seconds, fade_out_seconds
 from backend.audio.seam_plan import (
-    GRID_WINDOW_MARGIN_SECONDS, MAX_GLIDE_DEVIATION, SeamPlan, beat_period, deviation,
-    fit_grid, fold_ratio, kick_grid, plan_matched, plan_short,
+    GRID_WINDOW_MARGIN_SECONDS, MAX_GLIDE_DEVIATION, PULSE_HOP_SECONDS, SeamPlan, beat_period,
+    beatless_run, deviation, fit_grid, fold_ratio, kick_grid, plan_beatless, plan_matched, plan_short,
+    pulse_curve,
 )
 from backend.audio.stretch import engine_name, rubberband_available, timemap_stretch
 
 MIN_BLEND_SECONDS = 1.0  # blend region shorter than this: edges are ignored
 WARP_CONTEXT_SECONDS = 0.25  # extra audio fed to Rubber Band beyond each warped edge
 EDGE_BLEND_SECONDS = 0.010  # crossfade between untouched track and warped seam edge
+# A beat grid that can't be found over the blend's own span is retried over
+# this much audio: a breakdown can hide the kick for half a minute.
+GRID_RETRY_SECONDS = 64.0
+# Tempos too far apart to match: a side with no steady kick for at least this
+# long at the seam gets a beatless blend instead of an echo-out.
+BEATLESS_MIN_SECONDS = 4.0
+PULSE_WINDOW_MARGIN_SECONDS = 12.0  # extra audio for measuring the pulse when analysis stored none
 
 
 @dataclass(frozen=True)
@@ -241,11 +253,15 @@ def _plan_seam(
     out_beats: list[float], in_beats: list[float],
     request: TransitionRequest, clamped: float, lo: float, hi: float, notes: list[str],
     head: float = 0.0, tail: float = 0.0, hi_all: float | None = None,
-) -> SeamPlan:
-    """Choose glide / beat_matched / short / snapped / plain (see seam_plan.py).
+    beatless: tuple[float, float] = (0.0, 0.0),
+) -> SeamPlan | None:
+    """Choose glide / beat_matched / beatless / short / snapped / plain (see
+    seam_plan.py). None: the tempos are too far apart and both sides have a
+    beat, so the seam is an echo-out.
 
     clamped, lo, hi describe the blend itself; head / tail (seconds of fade on
-    the incoming start / outgoing end) are added on top for the whole seam."""
+    the incoming start / outgoing end) are added on top for the whole seam.
+    beatless: (outgoing, incoming) seconds with no steady kick at the seam."""
     out_len, in_len = out.shape[0], inc.shape[0]
     out_dur, in_dur = out_len / sr, in_len / sr
 
@@ -264,6 +280,11 @@ def _plan_seam(
     span = hi_all + GRID_WINDOW_MARGIN_SECONDS
     g_out, src_out = _grid(out, sr, out_beats, max(0.0, out_dur - span), out_dur)
     g_in, src_in = _grid(inc, sr, in_beats, 0.0, min(in_dur, span))
+    wide = max(span, GRID_RETRY_SECONDS)
+    if g_out is None and out_dur > span:
+        g_out, src_out = _grid(out, sr, out_beats, max(0.0, out_dur - wide), out_dur)
+    if g_in is None and in_dur > span:
+        g_in, src_in = _grid(inc, sr, in_beats, 0.0, min(in_dur, wide))
     if g_out and g_in:
         notes.append(f"beat grids: outgoing {g_out.bpm:.2f} BPM from {src_out}, "
                      f"incoming {g_in.bpm:.2f} BPM from {src_in}")
@@ -271,7 +292,7 @@ def _plan_seam(
         ratio, _ = fold_ratio(g_out.period, g_in.period)
         if deviation(ratio) <= MAX_GLIDE_DEVIATION:
             plan = plan_matched(out_len, in_len, sr, g_out, g_in, target_all, lo_all, hi_all,
-                                rubberband_available())
+                                rubberband_available(), after_land=tail)
             if isinstance(plan, SeamPlan):
                 return plan
             if plan == "needs_warp":
@@ -284,12 +305,20 @@ def _plan_seam(
             else:
                 notes.append("beat-matched blend does not fit the safe overlap range")
         else:
-            short = plan_short(out_len, in_len, sr, g_in, lo, hi_all, head, tail)
-            if short:
-                short.notes.insert(0, f"tempos {g_out.bpm:.1f} and {g_in.bpm:.1f} BPM differ by "
-                                      f"{deviation(ratio):.0%} after half/double folding (glide limit "
-                                      f"{MAX_GLIDE_DEVIATION:.0%}): no warp, requested overlap not used")
-                return short
+            why = (f"tempos {g_out.bpm:.1f} and {g_in.bpm:.1f} BPM differ by {deviation(ratio):.0%} "
+                   f"after half/double folding (glide limit {MAX_GLIDE_DEVIATION:.0%})")
+            run_out, run_in = beatless
+            if max(run_out, run_in) >= BEATLESS_MIN_SECONDS:
+                side = "outgoing" if run_out >= run_in else "incoming"
+                seconds = min(clamped, max(run_out, run_in))
+                ov = min(seconds + head + tail, hi_all, out_dur, in_dur)
+                beats = (list(in_beats) if side == "outgoing"
+                         else [b - (out_dur - ov) for b in out_beats])
+                plan = plan_beatless(out_len, in_len, sr, seconds, head, tail, beats, hi_all, side)
+                plan.notes.insert(0, f"{why}: no warp")
+                return plan
+            notes.append(f"{why}, and both sides have a beat: echo-out instead of a blend")
+            return None
     elif out_beats and in_beats:
         notes.append("beat grid too irregular to match beat-for-beat; only the first beat is aligned")
 
@@ -353,6 +382,9 @@ def render_transition(
     melody_hop_seconds: float | None = None,
     outgoing_fade_out_seconds: float | None = None,
     incoming_fade_in_seconds: float | None = None,
+    outgoing_pulse: list[float] | None = None,
+    incoming_pulse: list[float] | None = None,
+    pulse_hop_seconds: float | None = None,
 ) -> tuple[np.ndarray, AppliedTransition]:
     """Render the seam between two tracks.
 
@@ -377,6 +409,12 @@ def render_transition(
     by analysis (track.metadata) for a side that plays to its real end / from
     its real start, so the renderer and choose_windows use the identical
     value. None = measure from the audio here (edges.py), as before.
+
+    outgoing_pulse / incoming_pulse: the kick pulse analysis stored
+    (track.metadata["pulse"], sliced to the window) on pulse_hop_seconds.
+    With tempos too far apart to match, a side with no steady kick at the
+    seam gets a beatless blend, else the seam echoes out. None = measure from
+    the audio here (seam_plan.pulse_curve).
 
     In the result, actual_overlap_seconds is how much of the INCOMING track
     plays inside the seam (what mix.py skips afterwards). With a tempo glide
@@ -439,20 +477,30 @@ def render_transition(
         changed_for_safety = False
         region = None
     else:
+        beatless = (_beatless_runs(out, inc, sr, outgoing_beats_seconds, incoming_beats_seconds,
+                                   outgoing_pulse, incoming_pulse, pulse_hop_seconds, head, tail, hi)
+                    if request.beat_align else (0.0, 0.0))
         blended = _blend(out, inc, sr, outgoing_beats_seconds, incoming_beats_seconds, request,
-                         clamped, lo, hi, notes, head, tail, hi_all, g_out, g_in, mid_swap=clash)
+                         clamped, lo, hi, notes, head, tail, hi_all, g_out, g_in, mid_swap=clash,
+                         beatless=beatless)
         if blended is not None:
             seam, plan, eq_desc, region = blended
             if clash:
                 notes.append("both sides have lead melody at the seam: the vocals swap on a beat "
                              "instead of crossfading, so two melodies are never loud together")
         else:
+            cut = int(round(tail * sr))
+            if cut and out.shape[0] - cut > int(hi * sr):
+                notes.append(f"echo-out: outgoing's {tail:.2f}s fade-out cut so it echoes out of "
+                             f"full-level music")
+                out = out[:out.shape[0] - cut]
             seam, plan, eq_desc = _echo_out(out, inc, sr, list(outgoing_beats_seconds),
-                                            list(incoming_beats_seconds), safety, g_out, g_in)
+                                            list(incoming_beats_seconds), safety, g_out, g_in, clamped, head)
             notes.extend(plan.notes)
-            notes.append(f"requested overlap not used: both sides have lead melody at the seam "
-                         f"and the beats can't be matched for a vocal swap")
-            changed_for_safety = True
+            why = ("both sides have lead melody at the seam and the beats can't be matched for a "
+                   "vocal swap" if clash else "the beats can't be matched for a blend")
+            notes.append(f"requested overlap sets the echo-out's length instead of a blend: {why}")
+            changed_for_safety = clash  # far-apart tempos: windows.py planned this echo-out
             region = None
     o_start, in_cons, seam_len = plan.o_start, plan.in_consumed, plan.seam_len
 
@@ -504,17 +552,46 @@ def _stored_edge(seconds: float, dur: float) -> float:
     return float(min(max(0.0, seconds), MAX_EDGE_SECONDS, dur))
 
 
-def _echo_out(out, inc, sr, out_beats, in_beats, safety, g_out, g_in):
-    """Echo-out seam (echo.py): (seam, plan, eq description)."""
+def _beatless_runs(out, inc, sr, out_beats, in_beats, out_pulse, in_pulse, hop, head, tail,
+                   limit) -> tuple[float, float]:
+    """(seconds before the outgoing fade tail, seconds after the incoming fade
+    head) with no steady kick, up to limit. From the stored pulse curves, else
+    measured from the audio near the seam."""
+    out_dur, in_dur = out.shape[0] / sr, inc.shape[0] / sr
+    runs = []
+    for curve, audio, beats, at_end in ((out_pulse, out, out_beats, True), (in_pulse, inc, in_beats, False)):
+        dur = out_dur if at_end else in_dur
+        t = dur - tail if at_end else head
+        step = hop
+        if not curve:
+            seed = beat_period(list(beats), 0.0, dur)
+            if seed is None:
+                runs.append(0.0)
+                continue
+            span = min(dur, limit + PULSE_WINDOW_MARGIN_SECONDS)
+            lo = dur - span if at_end else 0.0
+            mono = audio[int(lo * sr):int((lo + span) * sr)].mean(axis=1)
+            curve, step = pulse_curve(mono, sr, seed, PULSE_HOP_SECONDS), PULSE_HOP_SECONDS
+            t -= lo
+        runs.append(beatless_run(curve, step, t, forward=not at_end, limit=limit))
+    return runs[0], runs[1]
+
+
+def _echo_out(out, inc, sr, out_beats, in_beats, safety, g_out, g_in, requested, head=0.0):
+    """Echo-out seam (echo.py): (seam, plan, eq description). requested: the
+    seconds of the outgoing song to filter out before its last bar line;
+    head: the incoming song's quiet lead-in."""
     out_dur, in_dur = out.shape[0] / sr, inc.shape[0] / sr
     grid_out, _ = _grid(out, sr, out_beats, max(0.0, out_dur - 20.0), out_dur)
     grid_in, _ = _grid(inc, sr, in_beats, 0.0, min(in_dur, 20.0))
     first = grid_in.first if grid_in is not None else (in_beats[0] if in_beats else 0.0)
     plan = plan_echo_out(out.shape[0], inc.shape[0], sr, grid_out, first,
-                         safety.max_fraction_of_track)
+                         safety.max_fraction_of_track, requested, head)
     seam = render_echo_out(out, inc, sr, plan, g_out, g_in)
-    eq = ("echo-out: outgoing lows (<200 Hz) ramped out over its last bar; last beat echoed "
-          "4x on a 1-beat delay, high-passed at 300 Hz, each repeat 6 dB quieter")
+    bars = f"last {plan.bars} bars" if plan.bars > 1 else "last bar"
+    eq = (f"echo-out: outgoing lows (<200 Hz) ramped out over its {bars}; last beat echoed "
+          f"{plan.repeats}x on a 1-beat delay, high-passed at 300 Hz, each repeat "
+          f"{-20 * np.log10(plan.feedback):.0f} dB quieter")
     return seam, plan, eq
 
 
@@ -526,7 +603,7 @@ def _drop(out, inc, sr, out_beats, in_beats, request, lo, hi, notes, g_out, g_in
     out_len, in_len = out.shape[0], inc.shape[0]
     if drop_rel <= hi:
         plan = _plan_seam(out, inc, sr, out_beats, in_beats, request, drop_rel, lo, hi, [])
-        if plan.kind in ("glide", "beat_matched") and len(plan.beats) >= 2:
+        if plan is not None and plan.kind in ("glide", "beat_matched") and len(plan.beats) >= 2:
             x = drop_rel * sr
             if plan.in_map:
                 src, dst = zip(*plan.in_map)
@@ -558,14 +635,19 @@ def _drop(out, inc, sr, out_beats, in_beats, request, lo, hi, notes, g_out, g_in
 
 
 def _blend(out, inc, sr, outgoing_beats_seconds, incoming_beats_seconds, request,
-           clamped, lo, hi, notes, head, tail, hi_all, g_out, g_in, mid_swap=False):
-    """Normal beat-matched blend (steps 2-5): (seam, plan, eq description, region).
-    mid_swap: both sides carry melody; None if both have beats that can't be
-    matched (a short or snapped plan)."""
+           clamped, lo, hi, notes, head, tail, hi_all, g_out, g_in, mid_swap=False,
+           beatless=(0.0, 0.0)):
+    """Normal blend (steps 2-5): (seam, plan, eq description, region). None
+    when the seam should echo out instead: both sides have beats that can't be
+    matched, or (mid_swap: both sides carry melody) only a short or snapped
+    plan fits."""
     plan_notes: list[str] = []
     plan = _plan_seam(out, inc, sr, list(outgoing_beats_seconds),
                       list(incoming_beats_seconds), request, clamped, lo, hi, plan_notes,
-                      head, tail, hi_all)
+                      head, tail, hi_all, beatless)
+    if plan is None:
+        notes.extend(plan_notes)
+        return None
     if mid_swap and plan.kind not in ("glide", "beat_matched", "plain"):
         return None  # beats that don't line up: a long blend would trainwreck
     notes.extend(plan_notes)

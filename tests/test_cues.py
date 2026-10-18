@@ -122,10 +122,10 @@ def test_vocal_swap_when_both_sides_are_melodic(tmp_path):
 
 def test_echo_out_when_both_sides_are_melodic_and_tempos_dont_match(tmp_path):
     (pa, a), (pb, b) = make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 20, 90, 2)
-    audio, t = seam(pa, a, pb, b, 6.0)
+    audio, t = seam(pa, a, pb, b, 2.0)  # one bar at 120 BPM
     assert t.applied_eq.startswith("echo-out")
     assert t.overlap_changed_for_safety
-    assert any("requested overlap not used" in n for n in t.safety_adjustments)
+    assert any("requested overlap sets the echo-out's length" in n for n in t.safety_adjustments)
     # A's last beat is at 19.7 s, so its last bar is 17.7-19.7 s; B's first beat
     # (0.2 s in) lands on that bar line, so B's sample 0 plays 1.8 s into the seam
     # (the grid is fitted to noise here, so allow a few tens of ms)
@@ -136,13 +136,19 @@ def test_echo_out_when_both_sides_are_melodic_and_tempos_dont_match(tmp_path):
     assert np.isfinite(audio).all() and np.abs(audio).max() <= 1.0
 
 
-def test_echo_out_ab_previews_are_identical(tmp_path):
+def test_echo_out_length_follows_the_request(tmp_path):
     (pa, a), (pb, b) = make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 20, 90, 2)
-    a2, ta = seam(pa, a, pb, b, 2.0, "preview")
-    b2, tb = seam(pa, a, pb, b, 8.0, "preview")
-    assert ta.actual_overlap_seconds == tb.actual_overlap_seconds
-    np.testing.assert_array_equal(a2, b2)
-
+    _, short = seam(pa, a, pb, b, 2.0)
+    _, long = seam(pa, a, pb, b, 8.0)
+    assert "over its last bar;" in short.applied_eq and "echoed 4x" in short.applied_eq
+    assert "over its last 4 bars;" in long.applied_eq and "echoed 8x" in long.applied_eq
+    # Both end A on the same bar line, with B's first beat (0.2 s in) on it.
+    assert short.outgoing_start_seconds == pytest.approx(17.7, abs=0.25)
+    assert long.outgoing_start_seconds == pytest.approx(short.outgoing_start_seconds - 6.0, abs=0.05)
+    for t in (short, long):
+        bar_line = 19.7 - t.outgoing_start_seconds
+        offset = t.output_duration_seconds - t.actual_overlap_seconds
+        assert offset == pytest.approx(bar_line - 0.2, abs=0.25)
 
 def test_blend_when_one_side_is_instrumental(tmp_path):
     (pa, a), (pb, b) = make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 20, 120, 2, melody=0.1)

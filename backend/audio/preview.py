@@ -108,6 +108,9 @@ def render_preview(
         outgoing_melody=out_p.melody,
         incoming_melody=in_p.melody,
         melody_hop_seconds=outgoing.energy_hop_seconds,
+        outgoing_pulse=out_p.pulse,
+        incoming_pulse=in_p.pulse,
+        pulse_hop_seconds=out_p.pulse_hop or in_p.pulse_hop,
         outgoing_fade_out_seconds=fades[0],
         incoming_fade_in_seconds=fades[1],
     )

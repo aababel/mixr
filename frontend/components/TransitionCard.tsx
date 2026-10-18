@@ -21,6 +21,8 @@ function beatLabel(notes: string[], tempoChange: number | null) {
   if (has("beat alignment skipped")) return null;
   if (has("drop (cut)")) return "Drop on the one";
   if (has("short blend")) return "Quick cut on the beat";
+  if (has("beatless blend")) return "No beat to clash";
+  if (has("echo-out: outgoing plays")) return "Echo → downbeat";
   if (has("beat grid too irregular")) return "First beat aligned";
   return tempoChange != null || has("beats matched") ? "Every beat locked" : "Beats aligned";
 }

@@ -18,9 +18,12 @@ Kinds of plan:
                 tempo across the blend (needs Rubber Band)
   beat_matched  tempos already close enough that the grids drift < 5 ms over
                 the blend: beats matched, no warp
-  short         tempos differ > MAX_GLIDE_DEVIATION after half/double folding
-                (or Rubber Band missing): ~2-beat blend ending on an incoming
-                beat, no warp
+  beatless      tempos differ > MAX_GLIDE_DEVIATION after half/double folding
+                but one side has no steady kick (pulse_curve) over the blend:
+                a full-length blend with no warp, nothing to clash
+  short         Rubber Band missing: ~2-beat blend ending on an incoming beat,
+                no warp (tempos too far apart with a beat on both sides are an
+                echo-out, echo.py)
   snapped       no usable beat grid: the previous behaviour (first incoming
                 beat snapped onto an outgoing beat, no warp)
   plain         beat_align=False: requested length as is
@@ -37,6 +40,7 @@ SHORT_BLEND_BEATS = 2.0
 # (beats, min, max share of the target length): an 8-bar phrase first, then
 # 4 bars, before any whole bar count.
 PHRASE_FITS = ((32, 0.8, 1.3), (16, 0.7, 1.35))
+GRID_SNAP_BEATS = 0.5  # a request this close to a whole bar count is played at exactly that count
 GRID_MAX_RMS_SECONDS = 0.02  # inlier jitter above this: grid rejected
 GRID_INLIER_SECONDS = 0.035  # detected beats further than this from the grid are ignored
 GRID_MIN_BEATS = 6
@@ -47,6 +51,8 @@ KICK_MIN_SHARPNESS = 1.8  # fold peak / mean below this = no clear kick pulse (b
 KICK_BPM_RANGE = (90.0, 180.0)
 GRID_MIN_INLIER_SHARE = 0.6  # at least this share of the window's beats must agree
 GRID_WINDOW_MARGIN_SECONDS = 10.0
+PULSE_HOP_SECONDS = 1.0  # pulse_curve resolution
+PULSE_WINDOW_SECONDS = 12.0  # audio each pulse_curve value is measured over (shorter reads noise as a pulse)
 MIN_PERIOD, MAX_PERIOD = 60.0 / 220.0, 60.0 / 50.0
 
 
@@ -156,35 +162,79 @@ def _low_onsets(mono: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray]:
     return flux, times
 
 
+def _fold(flux: np.ndarray, times: np.ndarray, period: float) -> tuple[float, float]:
+    """(sharpness, phase) of the onset strength folded at one beat period."""
+    bins = max(16, int(round(period / KICK_BIN_SECONDS)))
+    idx = np.floor((times % period) / period * bins).astype(int) % bins
+    hist = np.bincount(idx, weights=flux, minlength=bins)
+    hist = hist + 0.5 * (np.roll(hist, 1) + np.roll(hist, -1))  # tolerate bin edges
+    peak = int(np.argmax(hist))
+    sharp = float(hist[peak] / (np.mean(hist) + 1e-12))
+    return sharp, (peak + 0.5) / bins * period
+
+
+def _kick_base(seed_period: float) -> float:
+    base = seed_period
+    while base > 60.0 / KICK_BPM_RANGE[0]:
+        base /= 2
+    while base <= 60.0 / KICK_BPM_RANGE[1]:
+        base *= 2
+    return base
+
+
 def kick_pulse(mono: np.ndarray, sr: int, seed_period: float) -> tuple[float, float, float] | None:
     """(sharpness, phase_seconds, period) of the clearest kick pulse near
     seed_period, folded into the 90-180 BPM range the analysis uses."""
     flux, times = _low_onsets(mono, sr)
     if flux.size < 8 or flux.sum() <= 0:
         return None
-
-    def fold(period: float) -> tuple[float, float]:
-        bins = max(16, int(round(period / KICK_BIN_SECONDS)))
-        idx = np.floor((times % period) / period * bins).astype(int) % bins
-        hist = np.bincount(idx, weights=flux, minlength=bins)
-        hist = hist + 0.5 * (np.roll(hist, 1) + np.roll(hist, -1))  # tolerate bin edges
-        peak = int(np.argmax(hist))
-        sharp = float(hist[peak] / (np.mean(hist) + 1e-12))
-        return sharp, (peak + 0.5) / bins * period
-
-    base = seed_period
-    while base > 60.0 / KICK_BPM_RANGE[0]:
-        base /= 2
-    while base <= 60.0 / KICK_BPM_RANGE[1]:
-        base *= 2
-    best = max((fold(p) + (p,) for p in base * (1 + np.linspace(-0.015, 0.015, 61))),
+    base = _kick_base(seed_period)
+    best = max((_fold(flux, times, p) + (p,) for p in base * (1 + np.linspace(-0.015, 0.015, 61))),
                key=lambda r: r[0])
     p0 = best[2]
     for p in p0 * (1 + np.linspace(-0.0006, 0.0006, 25)):  # fine period search
-        r = fold(p) + (p,)
+        r = _fold(flux, times, p) + (p,)
         if r[0] > best[0]:
             best = r
     return best
+
+
+def pulse_curve(mono: np.ndarray, sr: int, seed_period: float,
+                hop_seconds: float = PULSE_HOP_SECONDS) -> list[float]:
+    """Kick-pulse sharpness (as kick_pulse measures it) of the
+    PULSE_WINDOW_SECONDS around each hop_seconds block, 0 where the kick band
+    is silent. Below KICK_MIN_SHARPNESS there is no steady kick there."""
+    flux, times = _low_onsets(mono, sr)
+    n = int(math.ceil(np.asarray(mono).shape[0] / sr / hop_seconds))
+    periods = _kick_base(seed_period) * (1 + np.linspace(-0.015, 0.015, 13))
+    out = []
+    for k in range(n):
+        c = (k + 0.5) * hop_seconds
+        i0, i1 = np.searchsorted(times, [c - PULSE_WINDOW_SECONDS / 2, c + PULSE_WINDOW_SECONDS / 2])
+        f, t = flux[i0:i1], times[i0:i1]
+        if f.size < 8 or f.sum() <= 1e-9:
+            out.append(0.0)
+            continue
+        out.append(round(max(_fold(f, t, p)[0] for p in periods), 3))
+    return out
+
+
+def beatless_run(curve: list[float] | None, hop: float | None, t: float, forward: bool,
+                 limit: float) -> float:
+    """Seconds from t (forward) or up to t (backward) with no steady kick in
+    a pulse_curve, up to limit. A single kick-like block (a fill) doesn't end
+    the run. 0 without a curve."""
+    if not curve or not hop or hop <= 0:
+        return 0.0
+    c = np.asarray(curve, dtype=np.float64)
+    i = int(round(t / hop))
+    seg = c[i:i + int(math.ceil(limit / hop))] if forward else c[max(0, i - int(math.ceil(limit / hop))):i][::-1]
+    if not seg.size:
+        return 0.0
+    kick = seg >= KICK_MIN_SHARPNESS
+    steady = kick & np.concatenate([kick[1:], [True]])  # two kick blocks in a row
+    hits = np.flatnonzero(steady)
+    return float(min(limit, (hits[0] if hits.size else seg.size) * hop))
 
 
 def kick_grid(mono: np.ndarray, sr: int, t_offset: float, seed_period: float) -> Grid | None:
@@ -249,9 +299,14 @@ def _clean_map(points: list[tuple[float, float]], sr: int) -> list[tuple[int, in
 
 def plan_matched(
     out_len: int, in_len: int, sr: int, g_out: Grid, g_in: Grid,
-    target: float, lo: float, hi: float, can_warp: bool,
+    target: float, lo: float, hi: float, can_warp: bool, after_land: float = 0.0,
 ) -> SeamPlan | str | None:
-    """Beat-for-beat blend of N beats (a multiple of 4 near `target`).
+    """Beat-for-beat blend of N beats near `target`.
+
+    A target whose landing (target minus after_land, the outgoing fade that
+    plays on past it) is within GRID_SNAP_BEATS of a whole bar keeps exactly
+    that landing: choose_windows aims it at the incoming song's next event.
+    Any other target is rounded to whole phrases (PHRASE_FITS), else bars.
 
     Returns a SeamPlan, "needs_warp" if the tempos drift audibly but Rubber
     Band is unavailable, or None if no N fits the safe range.
@@ -267,11 +322,16 @@ def plan_matched(
     p_avg = 0.5 * (p_o + p_i)
     want = target / p_avg
     n0 = max(4, 4 * int(round(want / 4)))
-    # Both edges sit on phrase starts, so a blend of whole phrases keeps the
-    # two songs' phrases changing together; any bar count only keeps bars.
-    phrased = [n for size, lo_f, hi_f in PHRASE_FITS
-               for n in sorted(range(size, int(want * hi_f) + 1, size), key=lambda n: abs(n - want))
-               if n >= want * lo_f]
+    land = (target - after_land) / p_avg
+    bars = 4 * round(land / 4)
+    if bars >= 4 and abs(land - bars) <= GRID_SNAP_BEATS:
+        phrased = [bars + int(round(after_land / p_avg))]
+    else:
+        # Both edges sit on phrase starts, so a blend of whole phrases keeps the
+        # two songs' phrases changing together; any bar count only keeps bars.
+        phrased = [n for size, lo_f, hi_f in PHRASE_FITS
+                   for n in sorted(range(size, int(want * hi_f) + 1, size), key=lambda n: abs(n - want))
+                   if n >= want * lo_f]
     for n in dict.fromkeys(phrased + list(range(n0, 3, -4)) + [2]):
         drift = n * abs(p_o - p_i)
         warp = drift > MAX_DRIFT_SECONDS
@@ -327,6 +387,21 @@ def plan_matched(
             )
         return plan
     return None
+
+
+def plan_beatless(out_len: int, in_len: int, sr: int, seconds: float, head: float, tail: float,
+                  beats: list[float], hi: float, beatless_side: str) -> SeamPlan:
+    """Blend of `seconds` (plus the fade edges) with no beat matching: one
+    side has no steady kick over it, so the two beats can't clash. beats:
+    seam-relative seconds of the side that has the beat; the band swaps land
+    on them."""
+    ov = int(round(min(seconds + head + tail, hi, out_len / sr, in_len / sr) * sr))
+    plan = SeamPlan(kind="beatless", o_start=out_len - ov, in_consumed=ov, seam_len=ov,
+                    beats=[int(round(b * sr)) for b in beats if 0 <= b * sr <= ov], target_seconds=seconds)
+    other = "incoming" if beatless_side == "outgoing" else "outgoing"
+    plan.notes.append(f"beatless blend of {ov / sr - head - tail:.2f}s: the {beatless_side} side has no "
+                      f"steady kick there, so nothing is beat-matched and the {other} beat carries the blend")
+    return plan
 
 
 def plan_short(out_len: int, in_len: int, sr: int, g_in: Grid, lo: float, hi: float,

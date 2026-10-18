@@ -177,7 +177,7 @@ export function orderTracks(trackIds: string[], keepOrder = false) {
 }
 
 /** "auto" sizes each blend to its pair; "longer" leans every blend longer;
- * "extended" allows blends up to about a minute (128 beats) where the songs suit it. */
+ * "extended" allows blends up to about a minute (96-128 beats) where the songs suit it. */
 export type TransitionLength = "auto" | "longer" | "extended";
 
 /** "full" plays every song; "set" trims each song to its best part to hit a target length. */
