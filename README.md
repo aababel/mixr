@@ -2,9 +2,17 @@
 
 Your playlist. DJ'd by AI. Built at DubHacks 2026 by Shaan, Aarav, and Sahil.
 
-Pipeline: Upload (3–5 MP3/WAV) → Analyze → Score → Order → optional A/B calibration → Mix → Play/Download.
+Pipeline: Upload (2–5 MP3/WAV) → Analyze → Score → Order → optional A/B calibration → Mix → Play/Download.
 
-> Status: upload works end to end. Analyze and order return placeholder data; calibration and mix return 501 until the renderer lands.
+> Status: the full pipeline works end to end, from upload to a downloadable mix.
+
+## What it does
+
+- **Analyzes** each song's tempo, beat grid, key, sections, vocals, energy and drops.
+- **Orders** the songs by scoring every pair on tempo, key, energy and loudness, and explains the choice. Users can drag their own order, and Mixr scores it against its pick.
+- **Tunes** to the user's taste with blind A/B comparisons of a short and a long blend.
+- **Mixes** in Full songs or DJ set mode, with Auto, Longer or Extended transitions. Each blend is planned from its two songs: a beat-matched tempo glide, a bass and hi-hat swap, a length in whole bars that lands on the next song's vocals, chorus or drop, and no vocal clashes. Tempos too far apart get an echo-out or a drop cut.
+- **Explains** every transition and shows the mix on a waveform timeline.
 
 ## Setup
 
@@ -96,7 +104,7 @@ Tests: `pytest`
 
 - All audio time values are in seconds.
 - One `render_transition` powers both A/B previews and the final mix.
-- Final mix keeps every track complete; only overlaps at the seams.
+- Full songs mode plays every song, trimmed only to hand off cleanly; DJ set mode plays the best part of each.
 - Calibration and Claude are optional; the default mix must always work.
 - Work on branches, merge through PRs.
 
