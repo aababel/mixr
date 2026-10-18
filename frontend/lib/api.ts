@@ -25,6 +25,18 @@ export type PairScore = {
   mood: number | null;
 };
 
+export type TransitionExplanation = {
+  from_id: string;
+  to_id: string;
+  reasons: string[];
+  score: number;
+};
+
+export type OrderExplanation = {
+  summary: string;
+  transitions: TransitionExplanation[];
+};
+
 export type AppliedTransition = {
   from_id: string;
   to_id: string;
@@ -141,9 +153,11 @@ export function analyzeTracks(trackIds: string[]) {
 }
 
 export function orderTracks(trackIds: string[]) {
-  return postJson<{ ordered_track_ids: string[]; scores: PairScore[] }>("/api/order", {
-    track_ids: trackIds,
-  });
+  return postJson<{
+    ordered_track_ids: string[];
+    scores: PairScore[];
+    explanation: OrderExplanation;
+  }>("/api/order", { track_ids: trackIds });
 }
 
 export function createMix(orderedTrackIds: string[], preference: Preference = NEUTRAL_PREFERENCE) {
