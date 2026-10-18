@@ -25,7 +25,7 @@ export default function ModePicker({ songs, fullSeconds, options, onChange }: Pr
     {
       mode: "full" as const,
       title: "Full songs",
-      detail: `Every song plays through · about ${formatSeconds(fullSeconds)}`,
+      detail: `Every song, trimmed only to hand off cleanly · up to ${formatSeconds(fullSeconds)}`,
     },
     {
       mode: "set" as const,

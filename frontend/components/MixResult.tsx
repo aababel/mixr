@@ -2,15 +2,24 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { mixAudioUrl, type MixResult as Mix, type Track } from "@/lib/api";
+import { mixAudioUrl, type MixResult as Mix, type Track, type TrackWindow } from "@/lib/api";
 import { formatSeconds } from "@/lib/format";
-import { BLEND_PREROLL_SECONDS, activeIndex, mixLayout, trackColor } from "@/lib/timeline";
+import { BLEND_PREROLL_SECONDS, activeIndex, isTrimmed, mixLayout, trackColor } from "@/lib/timeline";
 
 import MixTimeline from "./MixTimeline";
 import TransitionCard from "./TransitionCard";
 import { buttonClasses } from "./ui/Button";
 import Equalizer from "./ui/Equalizer";
 import Vinyl from "./ui/Vinyl";
+
+/** "1:12–2:45 of 4:30", or "Whole song · 4:30" when nothing was cut. */
+function playedPart(window: TrackWindow, track: Track | undefined) {
+  const duration = track?.duration_seconds;
+  const of = duration !== undefined ? formatSeconds(duration) : null;
+  if (!isTrimmed(window, duration)) return of ? `Whole song · ${of}` : "Whole song";
+  const range = `${formatSeconds(window.start_seconds)}–${formatSeconds(window.end_seconds)}`;
+  return of ? `${range} of ${of}` : range;
+}
 
 export default function MixResult({ mix, tracks }: { mix: Mix; tracks: Track[] }) {
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -52,6 +61,7 @@ export default function MixResult({ mix, tracks }: { mix: Mix; tracks: Track[] }
             <span className="text-sm text-neutral-400">
               {manifest.ordered_track_ids.length} songs ·{" "}
               {formatSeconds(manifest.output_duration_seconds)} ·{" "}
+              {manifest.mode === "set" ? "DJ set" : "full songs"} ·{" "}
               {manifest.calibrated ? "tuned to your taste" : "default transitions"}
             </span>
           </div>
@@ -106,8 +116,16 @@ export default function MixResult({ mix, tracks }: { mix: Mix; tracks: Track[] }
                       (s.index + 1).toString().padStart(2, "0")
                     )}
                   </span>
-                  <span className={`flex-1 truncate ${active ? "text-white" : ""}`}>{name(s.id)}</span>
-                  <span className="font-mono text-sm text-neutral-400 group-hover:text-white">
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className={`truncate ${active ? "text-white" : ""}`}>{name(s.id)}</span>
+                    {s.window && (
+                      <span className="text-xs text-neutral-500">
+                        <span className="font-mono text-neutral-400">{playedPart(s.window, byId.get(s.id))}</span>
+                        {s.window.reason && <> · {s.window.reason}</>}
+                      </span>
+                    )}
+                  </span>
+                  <span className="self-start pt-0.5 font-mono text-sm text-neutral-400 group-hover:text-white">
                     {formatSeconds(s.start)}
                   </span>
                 </button>

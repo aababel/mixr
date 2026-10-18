@@ -55,15 +55,27 @@ export type AppliedTransition = {
   output_duration_seconds: number;
 };
 
+/** The part of a song the mix plays, in seconds of the source song. */
+export type TrackWindow = {
+  track_id: string;
+  start_seconds: number;
+  end_seconds: number;
+  reason: string | null;
+};
+
 export type MixManifest = {
   mix_id: string;
   ordered_track_ids: string[];
   transitions: AppliedTransition[];
+  /** Window lengths: transition times are measured from each window's start. */
   source_durations_seconds: number[];
   output_duration_seconds: number;
   calibrated: boolean;
   overlap_preference: number;
   limitations: string[];
+  mode: "full" | "set";
+  /** Same order as ordered_track_ids; empty for mixes made without cue points. */
+  windows: TrackWindow[];
 };
 
 export type MixResult = {

@@ -7,6 +7,7 @@ import { formatSeconds } from "@/lib/format";
 import {
   BLEND_PREROLL_SECONDS,
   energyPath,
+  playedEnergy,
   trackColor,
   type Blend,
   type Segment,
@@ -27,7 +28,7 @@ type Props = {
 const pct = (seconds: number, total: number) => `${(seconds / total) * 100}%`;
 
 export default function MixTimeline({ total, segments, blends, tracks, currentTime, onSeek }: Props) {
-  const peak = Math.max(0, ...segments.flatMap((s) => tracks.get(s.id)?.energy_rms ?? []));
+  const peak = Math.max(0, ...segments.flatMap((s) => playedEnergy(tracks.get(s.id), s.window)));
   const clamp = (s: number) => Math.min(total, Math.max(0, s));
 
   function seekToPointer(e: MouseEvent<HTMLDivElement>) {
@@ -86,7 +87,7 @@ export default function MixTimeline({ total, segments, blends, tracks, currentTi
                 className="mt-auto h-3/4 w-full"
                 aria-hidden
               >
-                <path d={energyPath(track?.energy_rms ?? [], peak, WAVE_WIDTH)} fill={color} fillOpacity={0.55} />
+                <path d={energyPath(playedEnergy(track, s.window), peak, WAVE_WIDTH)} fill={color} fillOpacity={0.55} />
               </svg>
             </div>
           );
