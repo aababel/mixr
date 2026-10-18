@@ -295,7 +295,7 @@ the position in the source track.
   same cutting, so the Tune step previews the seam the mix will contain.
   Pass the same windows the mix will use.
 
-### Sahil: choosing cue points (windows)
+### Sahil: choosing cue points (windows) (implemented, `backend/logic/windows.py`)
 
 ```python
 def choose_windows(
@@ -327,6 +327,31 @@ If no candidate scores well, return the least-bad one and say so in
 `reason`, so the renderer can use the short-cut fallback. The order
 explanation can mention the chosen cues once windows exist.
 
+How the implementation decides (constants at the top of the module):
+
+- Candidates are phrase starts, else every 4th beat (bar lines), else a
+  4 s grid, plus the song's own start and end. A cue at the song's own end
+  or start is judged past its fade-out / quiet lead-in (from `energy_rms`),
+  where `transition.py` actually places the blend.
+- Melody and energy are measured over the overlap, or over echo.py's 8 s
+  if that's longer. Seam quality = 0.55 handoff + 0.25 energy + 0.20
+  structure. Handoff penalizes both melodies at once most, then A still
+  singing, then B starting busy; a falling A line earns a bonus; both sides
+  at echo.py's clash level cost extra.
+- Full mode: the first song starts at 0 and the last plays to its end; each
+  trimmed second costs 0.004 and no edge loses more than 30% of its song.
+- Set mode: per-song target lengths split `target_seconds + sum(overlaps)`
+  evenly (bounded by each song's length and the 45 s floor), cost = relative
+  length error + 0.3 x the part of the best section left out. The best
+  section is a `chorus`/`drop` section if ever labeled, else the loudest
+  30 s of `energy_rms` snapped out to the cue grid. Up to 4 passes re-aim
+  the targets until the set is within 5% (10% is accepted).
+- A dynamic program over the running order maximizes total seam quality
+  minus the length costs, so a middle song's entry and exit are picked
+  together. Every window is at least twice each adjoining overlap (the
+  renderer caps an overlap at half a window), so head and tail seams never
+  collide; songs too short for that play whole.
+
 ### Shaan: API and UI
 
 - `POST /api/mix` and `POST /api/calibration/preview` accept
@@ -337,8 +362,9 @@ explanation can mention the chosen cues once windows exist.
 - UI: a "Full songs / DJ set" toggle with a set-length picker on the
   running-order screen. The timeline shows only the played part of each song,
   and the tracklist shows which part was used (e.g. "1:12-2:45").
-- Until `choose_windows` and the windowed `render_mix` land, full mode keeps
-  today's behavior and set mode returns `501`, shown as "coming soon".
+- Preview cue points use the neutral overlap (`recommended_overlap_seconds(0)`),
+  since the preference isn't known yet; the mix uses its own overlap, so a
+  strongly "long blends" preference can shift a cue slightly.
 
 ## HTTP API (Shaan)
 
