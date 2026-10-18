@@ -12,6 +12,7 @@ from backend.main import app
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("MIXR_STORAGE_DIR", str(tmp_path))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)  # never call Claude from tests
     return TestClient(app)
 
 

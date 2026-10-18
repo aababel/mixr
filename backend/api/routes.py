@@ -28,6 +28,7 @@ from backend.api.schemas import (
 from backend.audio.analysis import analyze_track
 from backend.audio.harmony import chroma_for
 from backend.audio.mix import render_mix
+from backend.audio.mood import mood_scores
 from backend.audio.preview import render_preview
 from backend.logic.calibration import calibration_overlaps, update_preference
 from backend.logic.explain import OrderExplanation, explain_order, explain_user_order
@@ -256,7 +257,7 @@ def _distinct_tracks(track_ids: list[str], minimum: int) -> list[Track]:
 @router.post("/order", response_model=OrderResponse)
 def order(request: OrderRequest):
     tracks = _distinct_tracks(request.track_ids, 1)
-    scores = score_pairs(tracks)
+    scores = score_pairs(tracks, mood_scores(tracks))
     suggested = order_tracks(tracks, scores)
     if request.keep_order:
         ordered = list(request.track_ids)

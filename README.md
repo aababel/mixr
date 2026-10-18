@@ -13,8 +13,10 @@ Pipeline: Upload (2 to 5 MP3/WAV) → Analyze → Score → Order → optional A
 - **Score and order.** Every pair of songs gets a compatibility score: 40%
   harmony (Camelot wheel), 35% tempo (half and double time count as a match),
   15% energy, 10% mood. A missing score (no confident key, no mood) counts as
-  neutral. The Claude mood step is not wired in yet, so every pair gets a
-  neutral mood and today's scores are fully deterministic. The best order is found by checking every ordering. Users can
+  neutral. Mood comes from one Claude call per set of songs, which rates
+  every ordered pair from the filenames and analysis features (no audio is
+  sent). Without `ANTHROPIC_API_KEY`, or if the call fails, mood is neutral
+  and the scores are fully deterministic. The best order is found by checking every ordering. Users can
   drag songs into their own order instead, and Mixr explains how it scores
   against its own pick.
 - **Pick the played part of each song.** Full songs mode trims as little as
