@@ -31,9 +31,12 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
 
-MAX_GLIDE_DEVIATION = 0.14  # max |tempo ratio - 1| (after folding) for a glide
+MAX_GLIDE_DEVIATION = 0.22  # max |tempo ratio - 1| (after folding) for a glide
 MAX_DRIFT_SECONDS = 0.005  # below this total drift, beats are matched without warping
 SHORT_BLEND_BEATS = 2.0
+# (beats, min, max share of the target length): an 8-bar phrase first, then
+# 4 bars, before any whole bar count.
+PHRASE_FITS = ((32, 0.8, 1.3), (16, 0.7, 1.35))
 GRID_MAX_RMS_SECONDS = 0.02  # inlier jitter above this: grid rejected
 GRID_INLIER_SECONDS = 0.035  # detected beats further than this from the grid are ignored
 GRID_MIN_BEATS = 6
@@ -262,8 +265,14 @@ def plan_matched(
     tail = out_dur - last_out_beat  # outgoing audio after its last grid beat, < one beat
 
     p_avg = 0.5 * (p_o + p_i)
-    n0 = max(4, 4 * int(round(target / (4 * p_avg))))
-    for n in list(range(n0, 3, -4)) + [2]:
+    want = target / p_avg
+    n0 = max(4, 4 * int(round(want / 4)))
+    # Both edges sit on phrase starts, so a blend of whole phrases keeps the
+    # two songs' phrases changing together; any bar count only keeps bars.
+    phrased = [n for size, lo_f, hi_f in PHRASE_FITS
+               for n in sorted(range(size, int(want * hi_f) + 1, size), key=lambda n: abs(n - want))
+               if n >= want * lo_f]
+    for n in dict.fromkeys(phrased + list(range(n0, 3, -4)) + [2]):
         drift = n * abs(p_o - p_i)
         warp = drift > MAX_DRIFT_SECONDS
         if warp and not can_warp:

@@ -76,8 +76,9 @@ def test_crossfade_finishes_before_the_outgoing_fade():
     h = SR // 2
     levels = [_rms_db(seam[i:i + h]) - body for i in range(0, seam.shape[0] - h, h)]
     assert min(levels) > -4.0, levels
-    # beat alignment adjustments exclude the deliberate fade extension
-    assert abs(ap.beat_alignment_adjustments_seconds) < 2.0
+    # beat alignment adjustments exclude the deliberate fade extension; what's
+    # left is rounding to a whole phrase (seam_plan.PHRASE_FITS: up to +30%)
+    assert abs(ap.beat_alignment_adjustments_seconds) < 0.35 * 8.0
 
 
 @needs_rb

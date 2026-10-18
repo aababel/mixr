@@ -26,6 +26,7 @@ from backend.api.schemas import (
     Vote,
 )
 from backend.audio.analysis import analyze_track
+from backend.audio.harmony import chroma_for
 from backend.audio.mix import render_mix
 from backend.audio.preview import render_preview
 from backend.logic.calibration import (
@@ -263,7 +264,8 @@ def _choose_windows(
         target = options.target_seconds or DEFAULT_SET_SECONDS_PER_TRACK * len(tracks)
         target = min(MAX_SET_SECONDS, max(MIN_SET_SECONDS, target))
     try:
-        return choose_windows(tracks, overlaps, target)
+        chroma = [chroma_for(get_track_path(t.id)) for t in tracks]
+        return choose_windows(tracks, overlaps, target, chroma)
     except Exception as e:
         raise HTTPException(500, f"Choosing cue points failed: {e}")
 

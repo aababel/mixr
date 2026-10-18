@@ -29,18 +29,18 @@ def rms(x):
     return float(np.sqrt(np.mean(np.square(x)))) if x.size else 0.0
 
 
-def test_layered_drop_lands_on_the_seam_end_after_a_silent_beat():
+def test_layered_drop_builds_into_the_drop_without_a_break():
     out, ob = click_track(30.0, 120, seed=1)
     inc, ib = click_track(30.0, 120, seed=2)
     seam, ap = render_transition(out, inc, SR, ob, ib, drop_req(8.0), "final")
-    assert ap.applied_eq.startswith("drop:") and "rolled" in ap.applied_eq
-    assert "build under the sweep" in ap.applied_eq
+    assert ap.applied_eq.startswith("drop:") and "rolled" not in ap.applied_eq
+    assert "build rises under the sweep" in ap.applied_eq
     assert "incoming drop at 8.00s" in ap.applied_eq  # 16 matched beats in, no warp
     p = int(0.5 * SR)
     drop_at = int(round(8.0 * SR))
-    silent = seam[drop_at - p + int(0.15 * SR):drop_at - int(0.01 * SR)]
-    assert rms(silent) < 0.02, "the beat before the drop is (nearly) silent"
-    assert rms(seam[drop_at:drop_at + p]) > 5 * rms(silent), "B lands at full level"
+    before = seam[drop_at - p:drop_at - int(0.01 * SR)]
+    assert rms(before) > 0.05, "the beat before the drop keeps playing"
+    assert rms(seam[drop_at:drop_at + p]) > 0.05, "B lands at full level"
     o_start, ov = seam_sample_bounds(ap, SR)
     assert o_start + seam.shape[0] == out.shape[0]
     assert ov == seam.shape[0]

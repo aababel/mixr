@@ -95,14 +95,25 @@ def test_bass_and_highs_swap_at_the_right_time():
     seam_b, _ = render_transition(np.zeros_like(hats_b), hats_b, SR, [], [], r, "final")
     m = seam_a.shape[0]
     rms = lambda x: float(np.sqrt(np.mean(x ** 2)))
-    # outgoing bass stays at full level until the midpoint, then is gone
-    assert rms(seam_a[int(0.40 * m):int(0.48 * m)]) == pytest.approx(0.3 / np.sqrt(2), rel=0.05)
-    assert rms(seam_a[int(0.52 * m):int(0.9 * m)]) < 0.003
-    # incoming highs are silent until ~30%, then at full level
-    assert rms(seam_b[int(0.05 * m):int(0.28 * m)]) < 0.003
-    assert rms(seam_b[int(0.32 * m):int(0.6 * m)]) == pytest.approx(0.3 / np.sqrt(2), rel=0.05)
-    assert "lows <200 Hz swapped at 2.00s (50%)" in ap.applied_eq
-    assert "highs >5000 Hz swapped at 1.20s (30%)" in ap.applied_eq
+    # outgoing bass stays at full level until the blend lands (no beats: its end)
+    assert rms(seam_a[int(0.40 * m):int(0.95 * m)]) == pytest.approx(0.3 / np.sqrt(2), rel=0.05)
+    # incoming highs are silent until halfway, then at full level
+    assert rms(seam_b[int(0.05 * m):int(0.48 * m)]) < 0.003
+    assert rms(seam_b[int(0.52 * m):int(0.9 * m)]) == pytest.approx(0.3 / np.sqrt(2), rel=0.05)
+    assert "lows <200 Hz swapped at 4.00s (100%)" in ap.applied_eq
+    assert "highs >5000 Hz swapped at 2.00s (50%)" in ap.applied_eq
+
+
+def test_bass_lands_on_the_last_matched_beat():
+    """With beats, the bass swap is the phrase boundary the blend lands on."""
+    out, ob = clicks(30, 120, seed=3)
+    inc, ib = clicks(30, 120, first=0.0, seed=4)
+    _, ap = render_transition(out, inc, SR, ob, ib, req(8.0), "final")
+    assert any("beats matched over 16 beats" in s for s in ap.safety_adjustments)
+    swap = float(ap.applied_eq.split("lows <200 Hz swapped at ")[1].split("s")[0])
+    tail = ap.output_duration_seconds - swap
+    assert 0.0 <= tail < 0.5, "the bass swaps on the last matched beat, not the midpoint"
+    assert "highs >5000 Hz swapped at" in ap.applied_eq and "(5" in ap.applied_eq
 
 
 # ---------------------------------------------------------------- tempo glide
