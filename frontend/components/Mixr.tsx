@@ -89,7 +89,7 @@ export default function Mixr() {
   const [stage, setStage] = useState<Stage>("select");
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ label: string; text: string } | null>(null);
 
   const trackIds = tracks.map((t) => t.id);
   const filesError = files.length > 0 ? validateFiles(files) : null;
@@ -107,7 +107,7 @@ export default function Mixr() {
     try {
       await Promise.all([action(), sleep(MIN_LOADING_MS)]);
     } catch (e) {
-      if (e instanceof ApiError && e.status === 501) setNotice(e.message);
+      if (e instanceof ApiError && e.status === 501) setNotice({ label: "Coming soon", text: e.message });
       else setError(e instanceof Error ? e.message : String(e));
     } finally {
       setJob(null);
@@ -139,8 +139,19 @@ export default function Mixr() {
 
   const tune = () =>
     run("preview", async () => {
-      setFirstTrial(await previewCalibration(trackIds, 0));
-      setStage("tuning");
+      try {
+        setFirstTrial(await previewCalibration(trackIds, 0));
+        setStage("tuning");
+      } catch (e) {
+        if (!(e instanceof ApiError && e.status === 422)) throw e;
+        setJob("mix");
+        setMixResult(await createMix(trackIds, preference));
+        setStage("mixed");
+        setNotice({
+          label: "Skipped tuning",
+          text: "blend length wouldn't make an audible difference for these songs, so Mixr used its default transitions.",
+        });
+      }
     });
 
   const mix = () =>
@@ -248,7 +259,7 @@ export default function Mixr() {
 
       {notice && !job && (
         <p className="glass rounded-2xl px-4 py-3 text-sm text-neutral-300">
-          <span className="text-neon font-semibold">Coming soon:</span> {notice}
+          <span className="text-neon font-semibold">{notice.label}:</span> {notice.text}
         </p>
       )}
       {error && !job && (

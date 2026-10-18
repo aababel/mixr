@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import {
+  ApiError,
   apiUrl,
   previewCalibration,
   voteCalibration,
@@ -34,6 +35,10 @@ export default function Calibration({
 }) {
   const [trial, setTrial] = useState(initialTrial);
   const [trialIndex, setTrialIndex] = useState(0);
+  const [compared, setCompared] = useState<[string, string][]>([
+    [initialTrial.from_id, initialTrial.to_id],
+  ]);
+  const [exhausted, setExhausted] = useState(false);
   const [result, setResult] = useState<VoteResult | null>(null);
   const [chosen, setChosen] = useState<"A" | "B" | null>(null);
   const [busy, setBusy] = useState(false);
@@ -41,6 +46,9 @@ export default function Calibration({
 
   const name = (id: string) => tracks.find((t) => t.id === id)?.filename ?? id;
   const votes = preference.votes.length;
+  // One comparison per pair of neighboring songs, never the same pair twice.
+  const totalTrials = Math.min(MAX_TRIALS, orderedIds.length - 1);
+  const canContinue = !!result && votes < totalTrials && !error && !exhausted;
 
   async function attempt(action: () => Promise<void>) {
     setBusy(true);
@@ -64,9 +72,19 @@ export default function Calibration({
 
   const nextTrial = () =>
     attempt(async () => {
-      const next = await previewCalibration(orderedIds, trialIndex + 1);
+      let next: CalibrationTrial;
+      try {
+        next = await previewCalibration(orderedIds, trialIndex + 1, compared);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 422) {
+          setExhausted(true);
+          return;
+        }
+        throw e;
+      }
       setTrial(next);
       setTrialIndex(trialIndex + 1);
+      setCompared([...compared, [next.from_id, next.to_id]]);
       setResult(null);
       setChosen(null);
     });
@@ -75,11 +93,11 @@ export default function Calibration({
     <section className="animate-fade-up flex flex-col gap-6">
       <div className="flex flex-col gap-1">
         <p className="font-mono text-xs tracking-widest text-neutral-500 uppercase">
-          Comparison {trialIndex + 1} of {MAX_TRIALS}
+          Comparison {trialIndex + 1} of {totalTrials}
         </p>
         <h1 className="font-display text-3xl font-semibold">Which blend do you like?</h1>
         <p className="text-neutral-400">
-          Same two songs, same fade. Only how long they overlap changes. Listen to both, then pick.
+          Same two songs. Only how long they overlap changes. Listen to both, then pick.
         </p>
       </div>
 
@@ -131,6 +149,12 @@ export default function Calibration({
         </div>
       )}
 
+      {exhausted && (
+        <p className="text-sm text-neutral-400">
+          That&apos;s every pair of songs where blend length makes an audible difference.
+        </p>
+      )}
+
       {error && (
         <p className="rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
           {error}
@@ -138,16 +162,16 @@ export default function Calibration({
       )}
 
       <div className="flex flex-col gap-3 sm:flex-row">
-        {result && votes < MAX_TRIALS && !error && (
+        {canContinue && (
           <Button onClick={nextTrial} disabled={busy} className="flex-1">
             {busy ? "Rendering previews…" : "Next comparison"}
           </Button>
         )}
         <Button
-          variant={result && (votes >= MAX_TRIALS || error) ? "primary" : "ghost"}
+          variant={result && !canContinue ? "primary" : "ghost"}
           onClick={onMix}
           disabled={busy}
-          className={result && votes < MAX_TRIALS && !error ? "" : "flex-1"}
+          className={canContinue ? "" : "flex-1"}
         >
           {votes > 0 ? "Mix it with my taste" : "Skip, use default transitions"}
         </Button>
