@@ -22,7 +22,7 @@ import soundfile as sf
 from backend.api.schemas import AppliedTransition, Track, TrackWindow, TransitionRequest
 from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.loudness import DEFAULT_LOUDNESS, gain_notes, integrated_loudness, track_gain_for_path
-from backend.audio.transition import render_transition
+from backend.audio.transition import DEFAULT_SAFETY, SafetyLimits, render_transition
 from backend.audio.windows import edge_fades_for_seam, play, with_entry
 
 PREVIEW_CONTEXT_SECONDS = 6.0

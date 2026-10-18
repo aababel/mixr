@@ -39,7 +39,13 @@ from backend.api.schemas import (
 from backend.audio.loading import RENDER_SR, load_render_audio
 from backend.audio.loudness import DEFAULT_LOUDNESS, TrackGain, gain_notes, track_gain_for_path
 from backend.audio.stretch import rubberband_available
-from backend.audio.transition import gain_factor, render_transition, seam_sample_bounds
+from backend.audio.transition import (
+    DEFAULT_SAFETY,
+    SafetyLimits,
+    gain_factor,
+    render_transition,
+    seam_sample_bounds,
+)
 from backend.audio.windows import check_windows, edge_fades, edge_fades_for_seam, play, with_entry
 
 _CHUNK = RENDER_SR * 10  # scale and write long track bodies 10 s at a time
