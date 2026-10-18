@@ -346,6 +346,22 @@ How the implementation decides (constants at the top of the module):
     last melodic moment to B's first. Up to 8 s is fine; 32 s scores 0. This
     stops a vocal ending from running into a long instrumental intro.
   - Payoff: B's energy and melody in the 16 s right after the blend.
+- Drop transitions: a drop is a phrase start where the energy over the next
+  8 s jumps (0.3 of the song's loudness = full strength) up to near full.
+  For each drop of the incoming song, a build start a whole number of bars
+  (about the overlap, at most 14 s) before it is added as a candidate
+  start. A drop seam scores 0.45 + 0.35 x strength + 0.1 x A's energy as it
+  leaves + 0.1 x structure, and replaces the blend where it scores higher
+  (a strong drop beats even a clean blend). The incoming window then sets
+  `drop_seconds`; mix.py and preview.py turn that into
+  `TransitionRequest(style="drop", requested_overlap_seconds=build)`.
+  backend/audio/drop.py renders it: the outgoing song gets a resonant
+  high-pass sweep (40 Hz to 1.8 kHz, with makeup gain), its last bar rolls
+  (1, 1/2, 1/4, 1/8 beat), the beat before the drop is silent, and the
+  incoming drop lands with full bass. With tempos close enough to glide, the
+  build plays under the sweep without its bass (layered); otherwise the
+  incoming song starts cold on its drop (cut). Both A/B previews of a drop
+  seam sound the same, like echo-out.
 - Full mode: the first song starts at 0 and the last plays to its end; each
   trimmed second costs 0.003 (a sparse second, below 0.7 of the song's
   normal loudness, proportionally less) and no edge loses more than 30% of

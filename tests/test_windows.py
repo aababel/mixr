@@ -9,6 +9,7 @@ from backend.logic.windows import (
     TIME_GRID_SECONDS,
     best_section,
     choose_windows,
+    find_drops,
 )
 
 HOP = 0.5
@@ -58,6 +59,9 @@ def played(windows, overlaps):
 def assert_on_grid(track, windows_or_window):
     w = windows_or_window
     grid = {0.0, track.duration_seconds, *[round(p, 3) for p in track.phrase_starts_seconds]}
+    if w.drop_seconds is not None:  # a drop entry starts its build on a beat
+        assert round(w.drop_seconds, 3) in grid
+        grid |= {round(b, 3) for b in track.beats_seconds}
     assert round(w.start_seconds, 3) in grid
     assert round(w.end_seconds, 3) in grid
 
@@ -120,12 +124,14 @@ def test_full_mode_skips_a_long_instrumental_intro_after_a_vocal():
 
 
 def test_full_mode_prefers_the_latest_good_end_and_earliest_good_start():
-    # Quiet melody at several phrase ends: keep as much of each song as possible.
+    # Quiet melody at several phrase ends: keep as much of each song as
+    # possible. A's instrumental end already hands over, and B's quiet
+    # phrases would only stretch the gap without melody to 20 s.
     a = make_track("a", melody=[(0, 192, 0.9), (100, 112, 0.1), (164, 176, 0.1)])
     b = make_track("b", melody=[(0, 192, 0.9), (16, 32, 0.1), (48, 64, 0.1)])
     wa, wb = choose_windows([a, b], [8.0])
     assert wa.end_seconds == 176.0
-    assert wb.start_seconds == 16.0
+    assert wb.start_seconds == 0.0
 
 
 def test_full_mode_trims_little_when_songs_already_hand_over():
@@ -235,6 +241,21 @@ def test_set_mode_works_without_phrases_or_beats():
 
 
 def test_set_mode_enters_in_a_break_so_the_next_section_lands_as_a_leaves():
+    # B's break is no quieter than the rest (no drop after it), only its
+    # melody dips: enter in the break's last phrase.
+    sections = [Section(start_seconds=0, end_seconds=96, energy=0.9),
+                Section(start_seconds=96, end_seconds=128, energy=0.8, label="break"),
+                Section(start_seconds=128, end_seconds=240, energy=0.9)]
+    a = make_track("a", duration=240.0, melody=[(0, 240, 0.9), (196, 208, 0.1)])
+    b = make_track("b", duration=240.0, sections=sections, melody=[(0, 240, 0.9), (96, 128, 0.2)],
+                   energy=[(128, 176, 0.9)])
+    wa, wb = choose_windows([a, b], [8.0], 200.0)
+    assert wb.drop_seconds is None
+    assert wb.start_seconds == 112.0, "last phrase of the break: B's melody kicks in after the blend"
+    assert "after the blend" in wb.reason
+
+
+def test_set_mode_lands_the_drop_after_a_break_as_a_leaves():
     sections = [Section(start_seconds=0, end_seconds=96, energy=0.9),
                 Section(start_seconds=96, end_seconds=128, energy=0.4, label="break"),
                 Section(start_seconds=128, end_seconds=240, energy=1.0)]
@@ -242,18 +263,30 @@ def test_set_mode_enters_in_a_break_so_the_next_section_lands_as_a_leaves():
     b = make_track("b", duration=240.0, sections=sections,
                    melody=[(0, 240, 0.9), (96, 128, 0.2)], energy=[(96, 128, 0.4), (128, 176, 1.0)])
     wa, wb = choose_windows([a, b], [8.0], 200.0)
-    assert wb.start_seconds == 112.0, "last phrase of the break: B's melody kicks in after the blend"
-    assert "after the blend" in wb.reason
+    assert wb.drop_seconds == 128.0
+    assert wb.start_seconds == 120.0, "an 8 s build: 4 bars at 120 BPM"
+    assert "drop at 2:08" in wb.reason and "beat of silence" in wa.reason
+    check_windows([a, b], [wa, wb])
 
 
 def test_full_mode_skips_an_outro_running_into_a_sparse_intro():
     # A's last 32 s and B's first 32 s are thin (quiet, no melody). Blending
-    # them is a handoff with nothing playing: trim into the music instead.
+    # them is a handoff with nothing playing: trim into the music, or build
+    # into B's drop where its music starts.
     a = make_track("a", melody=[(0, 192, 0.8), (160, 192, 0.1)], energy=[(160, 192, 0.25)])
     b = make_track("b", melody=[(0, 32, 0.1), (32, 192, 0.8)], energy=[(0, 32, 0.25)])
     wa, wb = choose_windows([a, b], [8.0])
-    assert wa.end_seconds <= 160.0 or wb.start_seconds >= 32.0
+    assert wa.end_seconds <= 160.0 or wb.start_seconds >= 32.0 or wb.drop_seconds == 32.0
     assert "sparse" not in wa.reason
+
+
+def test_find_drops_and_blends_without_them():
+    t = make_track("t", energy=[(0, 192, 0.5), (64, 192, 1.0)])
+    assert find_drops(t) == [(64.0, 1.0)]
+    assert find_drops(make_track("flat")) == []
+    # Flat energy: no drop anywhere, so every seam is a blend.
+    windows = choose_windows([make_track(i) for i in "abc"], [8.0, 8.0], 200.0)
+    assert all(w.drop_seconds is None for w in windows)
 
 
 def test_best_section_prefers_labeled_chorus_then_loudest_stretch():
