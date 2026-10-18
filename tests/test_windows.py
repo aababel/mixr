@@ -2,11 +2,18 @@ import numpy as np
 import pytest
 
 from backend.api.schemas import Section, Track
+from backend.audio.analysis import block_rms
+from backend.audio.echo import melody_clash
+from backend.audio.edges import MAX_EDGE_SECONDS, fade_in_seconds, fade_out_seconds
 from backend.audio.windows import check_windows
 from backend.logic.windows import (
+    FADE_IN_KEY,
+    FADE_OUT_KEY,
     SET_MIN_WINDOW_SECONDS,
     SET_TOLERANCE,
     TIME_GRID_SECONDS,
+    WEIGHTS,
+    _cues,
     best_section,
     choose_windows,
     find_drops,
@@ -298,3 +305,101 @@ def test_best_section_prefers_labeled_chorus_then_loudest_stretch():
     bare = make_track("b")
     bare.energy_rms = []
     assert best_section(bare) is None
+
+
+def _renderer_clash(a, wa, b, wb):
+    """What transition.py will decide, computed independently: cut melody the
+    way audio/windows.play does and ask echo.melody_clash (flat energy here,
+    so there are no fade edges)."""
+    def cut(t, w):
+        return t.melody_activity[int(w.start_seconds / HOP):int(np.ceil(w.end_seconds / HOP))]
+    clash, _, _ = melody_clash(cut(a, wa), cut(b, wb), HOP, wa.end_seconds - wa.start_seconds)
+    return clash
+
+
+def test_echo_out_reason_uses_the_renderers_8_second_check():
+    # Regression: with a 12 s overlap the old code averaged A's melody over the
+    # last 12 s (0.47, under the 0.5 clash level) while echo.py checks only the
+    # last 8 s (0.6), so the renderer echoed out but the reason didn't say so.
+    # Songs shorter than 2x the overlap play whole, so the seam is fixed.
+    a = make_track("a", duration=20.0, melody=[(0, 12, 0.2), (12, 20, 0.6)])
+    b = make_track("b", duration=20.0, melody=[(0, 20, 0.6)])
+    wa, wb = choose_windows([a, b], [12.0])
+    assert (wa.start_seconds, wa.end_seconds, wb.start_seconds) == (0.0, 20.0, 0.0)
+    assert _renderer_clash(a, wa, b, wb)
+    assert "echo" in wa.reason
+
+
+@pytest.mark.parametrize("overlap", [4.0, 8.0, 12.0, 16.0])
+@pytest.mark.parametrize("a_melody,b_melody", [
+    ([(0, 192, 0.9), (148, 160, 0.1)], [(0, 192, 0.9), (16, 32, 0.1)]),  # clean handoff exists
+    ([(0, 192, 0.95)], [(0, 192, 0.95)]),                                # always clashes
+    ([(0, 184, 0.3), (184, 192, 0.7)], [(0, 192, 0.55)]),                # near the threshold
+])
+def test_echo_out_reason_always_matches_the_renderer(overlap, a_melody, b_melody):
+    a = make_track("a", melody=a_melody)
+    b = make_track("b", melody=b_melody)
+    wa, wb = choose_windows([a, b], [overlap])
+    assert ("echo" in wa.reason) == _renderer_clash(a, wa, b, wb), wa.reason
+
+
+def test_seam_weights_sum_to_one():
+    # quality is a weighted sum compared against POOR_SEAM and NEUTRAL, so
+    # retuning the weights must keep them summing to 1.0.
+    assert sum(WEIGHTS.values()) == pytest.approx(1.0)
+
+
+def test_best_section_ignores_nan_energy():
+    # Regression: one NaN frame made np.argmax return the first NaN-tainted
+    # window, so the "best part" landed near the song's start.
+    t = make_track("t", duration=192.0, energy=[(0, 192, 0.3), (112, 144, 1.0)])
+    t.energy_rms[20] = float("nan")
+    start, end = best_section(t)
+    assert start >= 96.0 and end <= 160.0
+
+
+def test_stored_fade_lengths_replace_the_energy_estimate():
+    # A song with a real 6 s fade-out. The renderer's edges.py measures it from
+    # the audio; the energy_rms estimate reads it about 40% short. When
+    # analysis stores edges.py's numbers, windows.py must use exactly those.
+    sr = 22050
+    t = np.arange(int(90 * sr)) / sr
+    y = (0.3 * np.sin(2 * np.pi * 220 * t) * np.clip((90 - t) / 6, 0, 1) ** 2
+         * np.clip(t / 5, 0, 1) ** 2).astype(np.float32)
+    track = Track(id="f", filename="f.wav", duration_seconds=90.0, sample_rate=sr,
+                  energy_rms=block_rms(y, sr, HOP), energy_hop_seconds=HOP)
+    estimated = _cues(track)
+    track.metadata = {FADE_OUT_KEY: fade_out_seconds(y, sr), FADE_IN_KEY: fade_in_seconds(y, sr)}
+    measured = _cues(track)
+    assert measured.tail == pytest.approx(fade_out_seconds(y, sr))
+    assert measured.head == pytest.approx(fade_in_seconds(y, sr))
+    assert measured.tail > estimated.tail  # the estimate it replaces reads short
+
+
+@pytest.mark.parametrize("bad", [None, "6", float("nan"), -1.0, True])
+def test_unusable_stored_fade_falls_back_to_the_estimate(bad):
+    track = make_track("a", energy=[(186, 192, 0.01)])
+    estimated = _cues(track).tail
+    track.metadata = {FADE_OUT_KEY: bad}
+    assert _cues(track).tail == estimated
+
+
+def test_stored_fade_is_capped_like_the_renderer():
+    track = make_track("a")
+    track.metadata = {FADE_OUT_KEY: 30.0}
+    assert _cues(track).tail == MAX_EDGE_SECONDS
+
+
+def test_stored_fade_moves_where_the_seam_is_judged():
+    # A's melody is quiet for the 8 s before a 10 s fade and busy inside it.
+    # With the stored 10 s fade the seam is judged before the fade (quiet):
+    # no echo-out. Judged at the energy estimate's shorter fade, it would see
+    # the busy melody inside the fade.
+    a = make_track("a", duration=20.0, melody=[(0, 2, 0.9), (2, 10, 0.1), (10, 20, 0.9)])
+    b = make_track("b", duration=20.0, melody=[(0, 20, 0.9)])
+    a.metadata = {FADE_OUT_KEY: 10.0}
+    wa, _ = choose_windows([a, b], [12.0])
+    assert "echo" not in wa.reason
+    a.metadata = {FADE_OUT_KEY: 0.0}
+    wa, _ = choose_windows([a, b], [12.0])
+    assert "echo" in wa.reason

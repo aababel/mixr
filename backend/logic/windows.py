@@ -39,7 +39,7 @@ import numpy as np
 
 from backend.api.schemas import Section, Track, TrackWindow
 from backend.audio.cues import BEATS_PER_BAR
-from backend.audio.echo import CLASH_SECONDS, MELODY_CLASH
+from backend.audio.echo import CLASH_SECONDS, MELODY_CLASH, melody_clash
 from backend.audio.edges import MAX_EDGE_SECONDS, MIN_DROP_DB
 from backend.audio.windows import MIN_WINDOW_SECONDS
 
@@ -91,6 +91,12 @@ SET_LENGTH_COST = 1.0  # per unit of relative length error
 BEST_SECTION_COST = 0.3  # for leaving out the whole best section
 SET_LENGTH_PASSES = 4
 BEST_SECONDS = 30.0  # length of the "best part" every set window keeps
+
+# track.metadata keys for fade lengths measured by edges.py during analysis.
+# When present they're the same numbers the renderer works from; without
+# them the edges are estimated from energy_rms, which reads fades short.
+FADE_OUT_KEY = "fade_out_seconds"
+FADE_IN_KEY = "fade_in_seconds"
 
 # Fallback cue grid when a track has no beats.
 TIME_GRID_SECONDS = 4.0
@@ -235,9 +241,23 @@ def _cues(track: Track) -> _Cues:
     melody = _series(track.melody_activity, hop)
     if melody is not None:
         melody = np.clip(melody, 0.0, 1.0)
-    head = _edge_seconds(energy, hop, from_end=False)
-    tail = _edge_seconds(energy, hop, from_end=True)
+    head = _measured_edge(track, FADE_IN_KEY)
+    if head is None:
+        head = _edge_seconds(energy, hop, from_end=False)
+    tail = _measured_edge(track, FADE_OUT_KEY)
+    if tail is None:
+        tail = _edge_seconds(energy, hop, from_end=True)
     return _Cues(track, np.array([0.0, *inner, duration]), kind, melody, energy, hop, head, tail)
+
+
+def _measured_edge(track: Track, key: str) -> Optional[float]:
+    """Fade length analysis stored in track.metadata, None if absent or unusable."""
+    value = track.metadata.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return float(min(value, MAX_EDGE_SECONDS))
 
 
 def _edge_seconds(energy: Optional[np.ndarray], hop: Optional[float], from_end: bool) -> float:
@@ -347,7 +367,11 @@ def _score_seam(a: _Cues, b: _Cues, overlap: float, drop_at: Optional[dict] = No
     # Two melodies at once is the main thing to avoid (the product term);
     # beyond that, A still singing as it leaves is worse than B starting busy.
     handoff = 1.0 - (0.5 * np.sqrt(x * y) + 0.3 * x + 0.2 * y) + 0.3 * falling[:, None]
-    clash = (_nan_to(out_full, 0.0) >= MELODY_CLASH)[:, None] & (_nan_to(in_full, 0.0) >= MELODY_CLASH)[None, :]
+    # Echo-out is judged on echo.py's fixed CLASH_SECONDS at each edge, not on
+    # span: with a long overlap the two can disagree.
+    out_edge = np.array([_mean(a.melody, a.hop, e - CLASH_SECONDS, e) for e in ends])
+    in_edge = np.array([_mean(b.melody, b.hop, s, s + CLASH_SECONDS) for s in starts])
+    clash = (_nan_to(out_edge, 0.0) >= MELODY_CLASH)[:, None] & (_nan_to(in_edge, 0.0) >= MELODY_CLASH)[None, :]
     handoff = np.clip(handoff - CLASH_PENALTY * clash, 0.0, 1.0)
 
     e_out = np.array([_mean(a.energy, a.hop, e - span, e) for e in ends])
@@ -394,6 +418,26 @@ def _score_seam(a: _Cues, b: _Cues, overlap: float, drop_at: Optional[dict] = No
                  out_full, in_level, in_full, span, is_drop, drop_at)
 
 
+def _window_melody(c: _Cues, start: float, end: float) -> list[float]:
+    """melody_activity cut to [start, end] the way audio/windows.play cuts it."""
+    if not c.track.melody_activity or not c.hop:
+        return []
+    return list(c.track.melody_activity[int(start / c.hop):int(math.ceil(end / c.hop))])
+
+
+def _renderer_echoes(a: _Cues, a_start: float, a_end: float,
+                     b: _Cues, b_start: float, b_end: float) -> bool:
+    """Whether transition.py will echo this seam out, asked of echo.melody_clash
+    with the same window-relative melody and length the renderer passes it.
+    Fade edges only exist at a song's own ending or start; the renderer
+    measures them from audio, this uses the energy estimate."""
+    tail = a.tail if a_end >= a.duration else 0.0
+    head = b.head if b_start <= 0 else 0.0
+    clash, _, _ = melody_clash(_window_melody(a, a_start, a_end), _window_melody(b, b_start, b_end),
+                               a.hop, a_end - a_start, tail, head)
+    return clash
+
+
 def best_section(track: Track) -> Optional[tuple[float, float]]:
     """(start, end) of the song's best part, None without data.
 
@@ -410,6 +454,7 @@ def best_section(track: Track) -> Optional[tuple[float, float]]:
     if not track.energy_rms or not hop:
         return None
     energy = np.asarray(track.energy_rms, dtype=np.float64)
+    energy = np.where(np.isfinite(energy), energy, 0.0)  # as _series does
     for s in track.sections:
         if s.label in ("intro", "outro"):
             energy[int(s.start_seconds / hop):int(math.ceil(s.end_seconds / hop))] = 0.0
@@ -645,10 +690,11 @@ def choose_windows(
                 parts.append(f"Plays inside its loudest part ({_clock(b0)}-{_clock(b1)}).")
         if c.duration < mins[i]:
             parts.append("Too short to trim, so it plays in full.")
-        if tail is not None and not drop_out:
-            ej = picks[i + 1][0]
-            clash = tail.out_full[ei] >= MELODY_CLASH and tail.in_full[ej] >= MELODY_CLASH
-            if tail.quality[ei, ej] < POOR_SEAM or tail.handoff[ei, ej] < POOR_HANDOFF:
+        if tail is not None:
+            ej, next_end = picks[i + 1]
+            nxt = cues[i + 1]
+            clash = _renderer_echoes(c, s, e, nxt, float(nxt.grid[ej]), float(nxt.grid[next_end]))
+            if tail.quality[ei, ej] < POOR_SEAM:
                 why = ("both songs carry melody at every cue" if tail.handoff[ei, ej] < NEUTRAL
                        else "their energy never lines up")
                 parts.append(f"No clean handoff into {next_name} ({why}), so this is the least-bad cue"

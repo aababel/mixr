@@ -254,11 +254,22 @@ the position in the source track.
   loudness and melody change most. Without enough beats (fewer than 8),
   both lists stay empty and a note says so.
 - `analyze_track` fills `sections`: consecutive phrases merged while they
-  sound alike (a boundary is kept where the change is > 1.25x the track's
-  median change). The first starts at 0, the last ends at the duration, all
-  other boundaries are phrase starts. Labels only where the energy shape is
-  obvious: quiet first = `"intro"`, quiet last = `"outro"`, quiet middle =
-  `"break"`; everything else `None`.
+  sound alike. A phrase start begins a new section when the change there is
+  > 1.25x the track's median change or the loudness steps by >= 0.2, and no
+  section is longer than 2 phrases (16 bars, ~30 s at 128 BPM; the first
+  section also holds any lead-in before the first phrase). The first starts
+  at 0, the last ends at the duration, all other boundaries are phrase
+  starts. Labels only where the shape is obvious, everything else `None`:
+  - `"intro"` / `"outro"`: quiet first / last section (energy < 0.6)
+  - `"break"`: quiet middle section (energy < 0.5)
+  - `"drop"`: loud (>= 0.8) section the music lifts into (>= 0.2 above the
+    section before), with little lead melody (mean `melody_activity` < 0.5)
+  - `"chorus"`: loud melodic section that is lifted into, or comes back
+    later with something >= 0.2 quieter in between
+  - a loud section right after a chorus / drop that sounds the same keeps
+    its label (one long chorus split by the 16-bar cap)
+  `"verse"` and `"build"` are never set: energy alone can't tell a soft
+  verse from a break reliably.
 - Cue analysis adds about 5-10 s per song. If it fails, the track still
   analyzes; the three fields stay empty and a note says why.
 - **Echo-out** (`echo.py`), in every seam, preview and final, in both modes:
