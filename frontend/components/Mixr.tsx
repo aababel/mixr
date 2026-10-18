@@ -49,10 +49,10 @@ const STEP_OF: Record<Stage, number> = {
 
 const LOADING: Record<Job, { title: string; detail: string }> = {
   upload: { title: "Uploading your tracks", detail: "Making sure every file is real audio" },
-  analyze: { title: "Listening closely", detail: "Reading tempo, beats, key and energy" },
-  order: { title: "Finding the best order", detail: "Scoring how each song flows into the next" },
+  analyze: { title: "Listening closely", detail: "Reading tempo, beats, key, vocals and energy" },
+  order: { title: "Finding the best order", detail: "Claude reads each song's mood while Mixr scores every pairing" },
   preview: { title: "Rendering two previews", detail: "Same transition, two overlap lengths" },
-  mix: { title: "Mixing", detail: "Beat-matching and blending every transition" },
+  mix: { title: "Mixing", detail: "Beat-matching every transition, then mastering the mix" },
 };
 
 const HEADINGS: Record<Exclude<Stage, "tuning" | "mixed">, { title: string; detail: string }> = {
