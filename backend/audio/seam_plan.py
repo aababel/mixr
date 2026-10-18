@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
 
-MAX_GLIDE_DEVIATION = 0.22  # max |tempo ratio - 1| (after folding) for a glide
+MAX_GLIDE_DEVIATION = 0.15  # max |tempo ratio - 1| (after folding) for a glide
 MAX_DRIFT_SECONDS = 0.005  # below this total drift, beats are matched without warping
 SHORT_BLEND_BEATS = 2.0
 # (beats, min, max share of the target length): an 8-bar phrase first, then

@@ -29,6 +29,11 @@ Loudness matching: each track gets one gain (loudness.py) applied to its
 whole body AND passed to render_transition for both of its seams, using the
 same float32 factor, so level is continuous across seam boundaries and the
 seams match render_preview exactly.
+
+Mastering (master=True): the mix is written as float, then trimmed toward
+the loudness target as a whole (at most MASTER_MAX_GAIN_DB) and run through
+the look-ahead limiter so no peak passes -1 dBFS, then saved as 16-bit. A
+preview skips this, so it can differ from the mix by that one trim.
 """
 from pathlib import Path
 
@@ -39,18 +44,23 @@ from backend.api.schemas import (
     AppliedTransition, MixManifest, MixMode, Track, TrackWindow, TransitionRequest,
 )
 from backend.audio.loading import RENDER_SR, load_render_audio
-from backend.audio.loudness import DEFAULT_LOUDNESS, TrackGain, gain_notes, track_gain_for_path
+from backend.audio.loudness import (
+    DEFAULT_LOUDNESS, TrackGain, gain_notes, integrated_loudness, track_gain_for_path,
+)
 from backend.audio.stretch import rubberband_available
 from backend.audio.transition import (
     DEFAULT_SAFETY,
     SafetyLimits,
     gain_factor,
+    limit_peaks,
     render_transition,
     seam_sample_bounds,
 )
 from backend.audio.windows import check_windows, edge_fades, edge_fades_for_seam, play, with_entry
 
 _CHUNK = RENDER_SR * 10  # scale and write long track bodies 10 s at a time
+MASTER_CEILING = 0.891  # -1 dBFS sample peak for the finished mix
+MASTER_MAX_GAIN_DB = 3.0  # tracks are already matched; the master only trims the whole mix
 
 
 def _write(f: sf.SoundFile, block: np.ndarray, stats: dict, gain_db: float = 0.0) -> None:
@@ -59,12 +69,40 @@ def _write(f: sf.SoundFile, block: np.ndarray, stats: dict, gain_db: float = 0.0
         part = block[i:i + _CHUNK]
         if gain_db != 0.0:
             part = part * g
-        clipped = int(np.count_nonzero(np.abs(part) > 1.0))
-        if clipped:
-            stats["clipped"] += clipped
-            part = np.clip(part, -1.0, 1.0)
+        if stats["clip"]:
+            clipped = int(np.count_nonzero(np.abs(part) > 1.0))
+            if clipped:
+                stats["clipped"] += clipped
+                part = np.clip(part, -1.0, 1.0)
         f.write(part)
         stats["frames"] += part.shape[0]
+
+
+def _master(raw: Path, out_path: Path, stats: dict) -> list[str]:
+    """Finish the float mix in `raw` into a 16-bit WAV at out_path: one gain
+    toward the loudness target (at most MASTER_MAX_GAIN_DB either way), then
+    the look-ahead limiter on the whole mix so no peak passes MASTER_CEILING."""
+    audio, sr = sf.read(str(raw), dtype="float32", always_2d=True)
+    lufs = integrated_loudness(audio, sr)
+    gain_db = 0.0
+    if lufs is not None:
+        gain_db = float(np.clip(DEFAULT_LOUDNESS.target_lufs - lufs, -MASTER_MAX_GAIN_DB, MASTER_MAX_GAIN_DB))
+        if abs(gain_db) >= 0.1:
+            audio *= gain_factor(gain_db)
+        else:
+            gain_db = 0.0
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    note = (f"mastered: whole mix {gain_db:+.1f} dB toward {DEFAULT_LOUDNESS.target_lufs:.1f} LUFS"
+            + (f" (measured {lufs:.1f})" if lufs is not None else ""))
+    if peak > MASTER_CEILING:
+        audio = limit_peaks(audio, MASTER_CEILING, sr, edge_seconds=0.0)
+        note += f"; peaks limited from {20 * np.log10(peak):+.1f} to -1.0 dBFS"
+    clipped = int(np.count_nonzero(np.abs(audio) > 1.0))
+    if clipped:
+        stats["clipped"] += clipped
+        audio = np.clip(audio, -1.0, 1.0)
+    sf.write(str(out_path), audio, sr, subtype="PCM_16")
+    return [note]
 
 
 def render_mix(
@@ -80,6 +118,7 @@ def render_mix(
     windows: list[TrackWindow] | None = None,
     mode: MixMode | None = None,
     safety: SafetyLimits = DEFAULT_SAFETY,
+    master: bool = True,
 ) -> MixManifest:
     """Write the full mix to out_path (WAV). The manifest reports actual values.
 
@@ -89,6 +128,8 @@ def render_mix(
     mode: recorded in the manifest; defaults to "set" with windows, else "full".
     safety: limits for every seam (a longer max_overlap_seconds allows
     extended blends).
+    master: finish the whole mix (_master). Off, the WAV holds exactly the
+    rendered tracks and seams, like render_preview.
     """
     if len(tracks) < 1 or len(tracks) != len(paths):
         raise ValueError("tracks and paths must be non-empty and the same length")
@@ -107,7 +148,8 @@ def render_mix(
 
     transitions: list[AppliedTransition] = []
     durations: list[float] = []
-    stats = {"frames": 0, "clipped": 0}
+    stats = {"frames": 0, "clipped": 0, "clip": not master}
+    write_path = out_path.with_name(out_path.stem + ".raw.wav") if master else out_path
     gains: list[TrackGain | None] = []
     used_windows: list[TrackWindow] = []
     window_notes: list[str] = []
@@ -129,7 +171,7 @@ def render_mix(
         g = gain_for(i)
         return g.gain_db if g else 0.0
 
-    with sf.SoundFile(str(out_path), "w", RENDER_SR, 2, subtype="PCM_16") as f:
+    with sf.SoundFile(str(write_path), "w", RENDER_SR, 2, subtype="FLOAT" if master else "PCM_16") as f:
         cur_p, current = load(0)
         head = 0  # samples of `current` already consumed by the previous seam
         for i, track in enumerate(tracks):
@@ -174,11 +216,17 @@ def render_mix(
             transitions.append(applied)
             current, cur_p, head = nxt, nxt_p, ov
 
+    master_notes: list[str] = []
+    if master:
+        try:
+            master_notes = _master(write_path, out_path, stats)
+        finally:
+            write_path.unlink(missing_ok=True)
+
     if loudness_match:
         limitations = [
             f"loudness matched per track toward {DEFAULT_LOUDNESS.target_lufs:.1f} LUFS "
-            "(BS.1770 integrated, whole track); no limiter on track bodies, "
-            "so a boost stops at the track's peak headroom",
+            "(BS.1770 integrated, whole track); a track's boost stops at its peak headroom",
         ]
         short = [t.id for t, g in zip(tracks, gains) if g and g.note]
         if short:
@@ -217,6 +265,7 @@ def render_mix(
             f"beats not matched at {', '.join(beatless)}: tempos too far apart, so it blends "
             "where one side has no steady beat"
         )
+    limitations.extend(master_notes)
     limitations.extend(window_notes)
     missing_beats = [t.id for t in tracks if not t.beats_seconds]
     if missing_beats:

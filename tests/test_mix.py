@@ -36,7 +36,7 @@ def three(tmp_path):
 def test_mix_keeps_every_track_complete(tmp_path, three):
     paths, tracks = [p for p, _ in three], [t for _, t in three]
     out = tmp_path / "mix.wav"
-    m = render_mix("m1", tracks, paths, [4.0, 6.0], out, loudness_match=False)
+    m = render_mix("m1", tracks, paths, [4.0, 6.0], out, loudness_match=False, master=False)
 
     mix, sr = sf.read(out, dtype="float32")
     src = [load_render_audio(p) for p in paths]
@@ -66,7 +66,7 @@ def test_mix_keeps_every_track_complete(tmp_path, three):
 def test_mix_seams_match_shared_renderer(tmp_path, three):
     paths, tracks = [p for p, _ in three], [t for _, t in three]
     out = tmp_path / "mix.wav"
-    m = render_mix("m1", tracks, paths, [4.0, 6.0], out, loudness_match=False)
+    m = render_mix("m1", tracks, paths, [4.0, 6.0], out, loudness_match=False, master=False)
     mix, _ = sf.read(out, dtype="float32")
     a, b = load_render_audio(paths[0]), load_render_audio(paths[1])
     req = TransitionRequest(from_id="a", to_id="b", requested_overlap_seconds=4.0)
@@ -74,6 +74,24 @@ def test_mix_seams_match_shared_renderer(tmp_path, three):
     start = round(applied.outgoing_start_seconds * SR)
     np.testing.assert_allclose(mix[start:start + len(seam)], seam, atol=Q)
     assert m.transitions[0] == applied
+
+
+def test_mix_is_mastered_below_minus_one_dbfs(tmp_path, three):
+    paths, tracks = [p for p, _ in three], [t for _, t in three]
+    loud = []
+    for p, name in zip(paths, "xyz"):
+        y, _ = sf.read(p, dtype="float32")
+        y = 0.5 * y
+        y[::SR // 2] = 0.99  # quiet body with full-scale hits: the master boosts it past the ceiling
+        q = tmp_path / f"{name}.wav"
+        sf.write(q, y, SR, subtype="FLOAT")
+        loud.append(q)
+    out = tmp_path / "mix.wav"
+    m = render_mix("mm", tracks, loud, [4.0, 6.0], out, loudness_match=False)
+    mix, _ = sf.read(out, dtype="float32")
+    assert np.max(np.abs(mix)) <= 0.891 + Q
+    assert any(s.startswith("mastered") and "peaks limited" in s for s in m.limitations)
+    assert not out.with_name("mix.raw.wav").exists()
 
 
 def test_manifest_records_requests_and_flags(tmp_path, three):

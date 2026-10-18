@@ -87,7 +87,7 @@ Routes need no change. Every seam (A/B previews and the final mix) now:
   1x, 2x or 0.5x is closest (100 and 200 BPM are 0% apart and match on every
   other beat), so the 90-180 BPM fold in analysis only changes the number
   shown, never which seams match.
-- **Tempos too far apart to match** (more than 22% after half/double
+- **Tempos too far apart to match** (more than 15% after half/double
   folding, e.g. 90 BPM rap into 128 BPM house): if A's ending or B's opening
   has no steady kick for at least 4 s (`seam_plan.pulse_curve`: how sharply
   the onset flux folds onto the beat period over 12 s windows, per second;
@@ -325,7 +325,7 @@ the position in the source track.
   B's mids at -14 dB before it, so two vocals are never loud together.
   Recorded as `applied_eq` containing `"mids (vocals) swapped"` and a note
   `"both sides have lead melody at the seam: ..."`.
-- **Echo-out** (`echo.py`): every seam between tempos over 22% apart where
+- **Echo-out** (`echo.py`): every seam between tempos over 15% apart where
   both sides have a beat, and the same vocal clash when the beats can't be
   matched (even with a beatless side). A's fade-out is cut, A plays its
   last 1, 2 or 4 bars (the closest to the requested overlap, at most half
@@ -487,7 +487,7 @@ How the implementation decides (constants at the top of the module):
   scores 0.2 + 0.25 x strength + 0.1 x A's energy as it leaves + 0.1 x
   structure (at most ~0.65), and replaces the blend where it scores higher,
   so it only takes over from weak blends: clean blends score 0.75-0.9.
-  Drops between tempos over 22% apart (a cut with a beat of silence) are
+  Drops between tempos over 15% apart (a cut with a beat of silence) are
   scaled by 0.8, so they only win over an echo-out or a beatless blend
   where B has a strong drop. The incoming window then sets
   `drop_seconds`; mix.py and preview.py turn that into

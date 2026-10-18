@@ -20,7 +20,7 @@ Processing actually performed (and recorded in AppliedTransition):
      incoming head and finishes where the outgoing tail begins. The edges
      still play inside the seam, under the other track.
      Plan the seam from both beat lists (seam_plan.py):
-       - tempos within 22% (after half/double folding): match beats
+       - tempos within 15% (after half/double folding): match beats
          beat-for-beat. A request that lands on a whole bar (choose_windows
          aims it at the incoming song's next event) plays exactly that many
          bars; any other is rounded to a whole phrase (32 or 16 beats), else
@@ -41,7 +41,8 @@ Processing actually performed (and recorded in AppliedTransition):
      phrase boundary at its last matched beat: lows swap on that beat, highs
      halfway, mids cross over in the second half with fade_style. Recorded
      in applied_eq.
-  6. Soft limiter on the seam only if its peak exceeds the threshold.
+  6. Look-ahead gain limiter on the seam only if its peak exceeds the
+     threshold: turned down around peaks, never clipped.
 
 Vocal clash: when melody data is passed and BOTH sides carry lead melody at
 the seam (outgoing's last 8 s, incoming's first 8 s), the blend's mids swap
@@ -60,6 +61,7 @@ Takes precedence over the vocal swap.
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.ndimage import minimum_filter1d, uniform_filter1d
 
 from backend.api.schemas import AppliedTransition, RenderMode, TransitionRequest
 from backend.audio.bands import band_swap, mid_window
@@ -84,6 +86,8 @@ GRID_RETRY_SECONDS = 64.0
 # Tempos too far apart to match: a side with no steady kick for at least this
 # long at the seam gets a beatless blend instead of an echo-out.
 BEATLESS_MIN_SECONDS = 4.0
+LIMIT_HOLD_SECONDS = 0.030  # limiter look-ahead and hold either side of a peak
+LIMIT_EDGE_SECONDS = 0.010
 PULSE_WINDOW_MARGIN_SECONDS = 12.0  # extra audio for measuring the pulse when analysis stored none
 
 
@@ -214,16 +218,25 @@ def _fades(n: int, style: str, region: tuple[int, int] | None = None) -> tuple[n
     return fade_out.astype(np.float32)[:, None], fade_in.astype(np.float32)[:, None]
 
 
-def _soft_limit(x: np.ndarray, threshold: float) -> np.ndarray:
-    """Leave samples below threshold untouched; squash the rest toward 1.0."""
-    headroom = 1.0 - threshold
-    mag = np.abs(x)
-    over = mag > threshold
-    y = x.copy()
-    y[over] = np.sign(x[over]) * (
-        threshold + headroom * np.tanh((mag[over] - threshold) / headroom)
-    )
-    return y
+def limit_peaks(x: np.ndarray, threshold: float, sr: int,
+                edge_seconds: float = LIMIT_EDGE_SECONDS) -> np.ndarray:
+    """Look-ahead gain limiter: the audio is turned down around each peak
+    instead of clipped, so loud passages keep their shape. With edge_seconds
+    the gain eases back to 1 over the first and last edge_seconds, so a seam
+    meets the unlimited track bodies without a step."""
+    mag = np.max(np.abs(x), axis=1)
+    need = np.minimum(1.0, threshold / np.maximum(mag, 1e-12))
+    hold = max(2, int(round(LIMIT_HOLD_SECONDS * sr)))
+    gain = minimum_filter1d(need, size=2 * hold + 1, mode="nearest")
+    # two box passes reach at most `hold` samples, inside every min window, so gain(t) <= need(t)
+    box = 2 * (hold // 2) + 1
+    gain = uniform_filter1d(uniform_filter1d(gain, box, mode="nearest"), box, mode="nearest")
+    edge = min(int(round(edge_seconds * sr)), x.shape[0] // 2)
+    if edge:
+        ramp = np.linspace(0.0, 1.0, edge)
+        gain[:edge] = 1.0 - (1.0 - gain[:edge]) * ramp
+        gain[-edge:] = 1.0 - (1.0 - gain[-edge:]) * ramp[::-1]
+    return x * gain.astype(np.float32)[:, None]
 
 
 # ---------------------------------------------------------------- public API
@@ -507,7 +520,7 @@ def render_transition(
     # 6. soft limiter, only when needed
     peak = float(np.max(np.abs(seam)))
     if peak > safety.limiter_threshold:
-        seam = _soft_limit(seam, safety.limiter_threshold)
+        seam = limit_peaks(seam, safety.limiter_threshold, sr)
         new_peak = float(np.max(np.abs(seam)))
         notes.append(
             f"soft limiter on seam: peak {peak:.3f} -> {new_peak:.3f} "
