@@ -162,7 +162,7 @@ def test_mix_with_echo_out_keeps_every_sample(tmp_path):
     files = [make(tmp_path, "a", 20, 120, 1), make(tmp_path, "b", 25, 90, 2), make(tmp_path, "c", 18, 120, 3)]
     paths, tracks = [p for p, _ in files], [t for _, t in files]
     out = tmp_path / "mix.wav"
-    m = render_mix("m", tracks, paths, [4.0, 6.0], out, loudness_match=False)
+    m = render_mix("m", tracks, paths, [4.0, 6.0], out, loudness_match=False, master=False)
     mix, _ = sf.read(out, dtype="float32")
     src = [load_render_audio(p) for p in paths]
     o_start = [round(t.outgoing_start_seconds * SR) for t in m.transitions]
@@ -186,7 +186,7 @@ def test_mix_plays_only_the_windows(tmp_path):
                TrackWindow(track_id="b", start_seconds=2.0, end_seconds=28.0),
                TrackWindow(track_id="c", start_seconds=0.0, end_seconds=20.0)]
     out = tmp_path / "mix.wav"
-    m = render_mix("w", tracks, paths, [4.0, 4.0], out, loudness_match=False, windows=windows)
+    m = render_mix("w", tracks, paths, [4.0, 4.0], out, loudness_match=False, windows=windows, master=False)
     mix, _ = sf.read(out, dtype="float32")
     src = [load_render_audio(p) for p in paths]
 

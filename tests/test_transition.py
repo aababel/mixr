@@ -3,7 +3,7 @@ import pytest
 
 from backend.api.schemas import TransitionRequest
 from backend.audio.bands import MID_UNDER
-from backend.audio.transition import SafetyLimits, _soft_limit, render_transition, seam_sample_bounds
+from backend.audio.transition import SafetyLimits, limit_peaks, render_transition, seam_sample_bounds
 from backend.logic.windows import overlap_limits
 
 SR = 22050
@@ -222,7 +222,7 @@ def test_limiter_turns_peaks_down_without_clipping():
     t = np.arange(int(2 * SR)) / SR
     sine = np.sin(2 * np.pi * 220 * t).astype(np.float32)
     x = np.stack([1.3 * sine, 1.3 * sine], axis=1)
-    y = _soft_limit(x, 0.9, SR)
+    y = limit_peaks(x, 0.9, SR)
     edge = int(0.01 * SR)
     assert np.max(np.abs(y[edge:-edge])) <= 0.9 + 1e-6
     body = slice(SR // 2, 3 * SR // 2)

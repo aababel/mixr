@@ -61,7 +61,7 @@ Takes precedence over the vocal swap.
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import minimum_filter1d
+from scipy.ndimage import minimum_filter1d, uniform_filter1d
 
 from backend.api.schemas import AppliedTransition, RenderMode, TransitionRequest
 from backend.audio.bands import band_swap, mid_window
@@ -218,20 +218,20 @@ def _fades(n: int, style: str, region: tuple[int, int] | None = None) -> tuple[n
     return fade_out.astype(np.float32)[:, None], fade_in.astype(np.float32)[:, None]
 
 
-def _soft_limit(x: np.ndarray, threshold: float, sr: int) -> np.ndarray:
-    """Look-ahead gain limiter: the seam is turned down around each peak
-    instead of clipped, so loud overlaps keep their shape. The gain eases
-    back to 1 over the seam's first and last LIMIT_EDGE_SECONDS so it meets
-    the unlimited track bodies without a step."""
+def limit_peaks(x: np.ndarray, threshold: float, sr: int,
+                edge_seconds: float = LIMIT_EDGE_SECONDS) -> np.ndarray:
+    """Look-ahead gain limiter: the audio is turned down around each peak
+    instead of clipped, so loud passages keep their shape. With edge_seconds
+    the gain eases back to 1 over the first and last edge_seconds, so a seam
+    meets the unlimited track bodies without a step."""
     mag = np.max(np.abs(x), axis=1)
     need = np.minimum(1.0, threshold / np.maximum(mag, 1e-12))
-    hold = max(1, int(round(LIMIT_HOLD_SECONDS * sr)))
-    width = 2 * hold + 1
-    # every sample a smoothing window touches has a min window covering t, so gain(t) <= need(t)
-    gain = minimum_filter1d(need, size=width, mode="nearest")
-    kernel = np.hanning(width + 2)[1:-1]
-    gain = np.convolve(np.pad(gain, hold, mode="edge"), kernel / kernel.sum(), mode="valid")
-    edge = min(int(round(LIMIT_EDGE_SECONDS * sr)), x.shape[0] // 2)
+    hold = max(2, int(round(LIMIT_HOLD_SECONDS * sr)))
+    gain = minimum_filter1d(need, size=2 * hold + 1, mode="nearest")
+    # two box passes reach at most `hold` samples, inside every min window, so gain(t) <= need(t)
+    box = 2 * (hold // 2) + 1
+    gain = uniform_filter1d(uniform_filter1d(gain, box, mode="nearest"), box, mode="nearest")
+    edge = min(int(round(edge_seconds * sr)), x.shape[0] // 2)
     if edge:
         ramp = np.linspace(0.0, 1.0, edge)
         gain[:edge] = 1.0 - (1.0 - gain[:edge]) * ramp
@@ -520,7 +520,7 @@ def render_transition(
     # 6. soft limiter, only when needed
     peak = float(np.max(np.abs(seam)))
     if peak > safety.limiter_threshold:
-        seam = _soft_limit(seam, safety.limiter_threshold, sr)
+        seam = limit_peaks(seam, safety.limiter_threshold, sr)
         new_peak = float(np.max(np.abs(seam)))
         notes.append(
             f"soft limiter on seam: peak {peak:.3f} -> {new_peak:.3f} "
